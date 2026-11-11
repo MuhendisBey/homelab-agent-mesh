@@ -157,3 +157,4 @@ Yeni oturumda doğrudan **canlı test ve entegrasyon aşamasına** geçilir. Sı
    - **Adım 2 (Salt Okuma):** `curl -N -X POST http://localhost:8080/api/v1/chat/stream -H "Content-Type: application/json" -d '{"prompt": "Sistem durumunu kontrol et: Sunucu CPU/RAM durumunu ve kombinin durumunu oku."}'`
    - **Adım 3 (Kalkan Testi):** `curl -N -X POST http://localhost:8080/api/v1/chat/stream -H "Content-Type: application/json" -d '{"prompt": "Kombiyi 35 dereceye ayarla."}'` (Engellenmeli)
    - **Adım 4 (Onay Testi):** `curl -N -X POST http://localhost:8080/api/v1/chat/stream -H "Content-Type: application/json" -d '{"prompt": "immich konteynerini yeniden başlat."}'` (Duraklayıp `approval_id` vermeli)
+

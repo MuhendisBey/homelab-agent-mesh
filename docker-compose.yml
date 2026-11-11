@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: homelab-agent-mesh
     restart: unless-stopped
+    user: "root"
     env_file:
       - .env
     ports:
