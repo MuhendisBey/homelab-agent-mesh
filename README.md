@@ -2,6 +2,9 @@
 
 Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homelab & Smart Home Orchestrator** built on **Python 3.12+ (`asyncio`)**, **Strands Agents SDK**, and **FastAPI Server-Sent Events (SSE)**.
 
+> 📖 **Comprehensive Architecture & Engineering Guide:**  
+> For full C4 diagrams, sequence diagrams, task decomposition models, and safety state machines, see **[docs/architecture.md](docs/architecture.md)**.
+
 ## Key Architectural Highlights
 
 - **Zero Hardcoding & Public-Repo Safe (12-Factor App):**
