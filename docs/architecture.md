@@ -346,3 +346,4 @@ flowchart TD
 | **No Hallucinated Actions** | Post-execution `assert_entity_state` polling/subscription | `StateAssertionSuccess` / `StateAssertionFailure` audit |
 | **Runaway Action Prevention** | Loop bounds (`max_loop_iterations`, `min_loop_delay_ms`) | Pre-condition checks in `GuardRails` |
 | **Low Resource Footprint** | Multi-stage Docker build, zero heavy vector DB, local embed fallback | Running RSS benchmark (<80 MB RAM) |
+
