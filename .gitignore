@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# Secrets & environment-specific configuration (NEVER commit these)
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+config/settings.yaml
+config/*.local.yaml
+!config/settings.example.yaml
+
+# ---------------------------------------------------------------------------
+# Runtime data (reflection memory, logs)
+# ---------------------------------------------------------------------------
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+uv.lock.bak
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+

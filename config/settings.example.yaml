@@ -1,0 +1,165 @@
+# ============================================================================
+# homelab-agent-mesh - Structured Configuration Template
+# Copy to `config/settings.yaml` (gitignored) and customize for your setup.
+# Zero personal infrastructure data is committed in this template.
+# ============================================================================
+
+llm:
+  model_id: "gemini-3.8-flash"
+  embedding_model_id: "text-embedding-004"
+  temperature: 0.1
+  max_output_tokens: 4096
+  max_retries: 2
+  retry_initial_delay_sec: 2
+  retry_max_delay_sec: 15
+
+safety:
+  min_hvac_temp: 15.0
+  max_hvac_temp: 28.0
+  window_open_guard_temp: 8.0
+  climate_zones:
+    - climate_entity: "climate.main_thermostat"
+      window_sensors:
+        - "binary_sensor.living_room_window_contact"
+    - climate_entity: "climate.bedroom_radiator_valve"
+      window_sensors:
+        - "binary_sensor.bedroom_window_contact"
+  protected_containers:
+    - "homelab-agent-mesh"
+    - "network-vpn"
+    - "dns-resolver"
+    - "reverse-proxy"
+  protected_container_actions:
+    - "stop"
+    - "restart"
+    - "pause"
+  protected_vm_ids:
+    - 100
+    - 101
+  protected_guest_actions:
+    - "stop"
+    - "shutdown"
+    - "reboot"
+  destructive_tools_requiring_approval:
+    - "restart_container"
+    - "stop_container"
+    - "reboot_node"
+    - "stop_guest"
+    - "shutdown_guest"
+    - "delete_automation"
+  approval_timeout_sec: 300
+  max_tool_calls_per_task: 12
+  max_loop_iterations: 10
+  min_loop_delay_ms: 200
+  max_loop_delay_ms: 10000
+  max_assert_timeout_sec: 30.0
+  allowed_custom_event_patterns:
+    - "homelab_agent_*"
+    - "custom_notification_*"
+
+circuit_breaker:
+  failure_threshold: 3
+  reset_timeout_sec: 30.0
+
+agents:
+  parallel_tool_execution: false
+  supervisor:
+    name: "Supervisor"
+    window_size: 20
+    model_id: null
+    temperature: null
+    extra_instructions: ""
+  sub_agents:
+    ha:
+      enabled: true
+      name: "HASubAgent"
+      tool_name: "home_assistant_agent"
+      description: >-
+        Specialist sub-agent for Home Assistant smart-home operations: querying entity states,
+        switching lights/media players, adjusting HVAC setpoints within safety bounds, running
+        fast sequential WebSocket loops, firing custom events, and asserting physical state changes.
+      domain: "ha"
+      model_id: null
+      temperature: null
+      extra_instructions: ""
+    infra:
+      enabled: true
+      name: "InfraSubAgent"
+      tool_name: "infrastructure_agent"
+      description: >-
+        Specialist sub-agent for Homelab infrastructure: host CPU/RAM/swap/disk/thermal telemetry,
+        listing Docker containers, pausing/unpausing/restarting/stopping non-protected containers,
+        and inspecting/controlling Proxmox VE LXC/VM guests.
+      domain: "infra"
+      model_id: null
+      temperature: null
+      extra_instructions: ""
+
+memory:
+  similarity_threshold: 0.70
+  embedding_backend: "gemini"
+  local_embedding_dimensions: 256
+  max_rules_injected: 10
+  allow_agent_core_invariants: false
+  seed_lessons:
+    - domain: "ha"
+      core: true
+      rule: >-
+        When a radiator valve or thermostat target temperature is at or below the window-open
+        guard threshold (e.g. 7-8°C frost protection while a window contact sensor is open),
+        never override or increase the heating setpoint until the window is closed.
+    - domain: "infra"
+      core: true
+      rule: >-
+        When host CPU load is high, non-critical batch/ML worker containers (such as photo
+        machine-learning or transcoding jobs) may be temporarily paused using manage_container
+        with action='pause', while protected network/DNS/orchestrator containers must never be touched.
+
+sessions:
+  max_sessions: 64
+  idle_ttl_sec: 3600
+
+home_assistant:
+  ws_open_timeout_sec: 8.0
+  ws_command_timeout_sec: 10.0
+  rest_timeout_sec: 8.0
+  default_assert_timeout_sec: 6.0
+  default_poll_interval_ms: 400
+  numeric_tolerance: 0.25
+  verify_ssl: true
+  mutating_tools:
+    - "call_ha_service"
+    - "execute_sequential_loop"
+  entity_aliases:
+    living_room_tv: "media_player.living_room_tv"
+    main_thermostat: "climate.main_thermostat"
+    bedroom_valve: "climate.bedroom_radiator_valve"
+    dining_light: "light.dining_room_main"
+  mcp:
+    enabled: true
+    transport: "sse"
+    startup_timeout_sec: 10
+    tool_allowlist: []
+    tool_denylist: []
+
+infra:
+  disk_mounts:
+    - "/"
+  cpu_sample_interval_sec: 0.1
+  docker_stats_concurrency: 4
+  docker_timeout_sec: 10
+  container_stop_timeout_sec: 10
+  proxmox_timeout_sec: 10.0
+  mcp_server:
+    name: "homelab-infra-mcp"
+    transport: "stdio"
+    host: "127.0.0.1"
+    port: 8091
+    expose_destructive_tools: false
+
+server:
+  cors_origins: []
+  sse_keepalive_sec: 15.0
+
+plugins: []
+
