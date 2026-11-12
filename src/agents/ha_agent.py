@@ -36,14 +36,38 @@ You are the Home Assistant Specialist Sub-Agent in a hierarchical smart-home orc
    - NEVER claim an action succeeded unless `assert_entity_state` returned
      `StateAssertionSuccess` (`"verified": true`). If it returns `StateAssertionFailure`,
      report the failure and actual state accurately.
-2. **Safety & Heating Protection**:
+2. **Rapid Sequential Loops**:
+   - For repeating sub-second actions (e.g., toggle/blink N times with ms delays), ALWAYS use
+     `execute_sequential_loop` once over WebSocket instead of calling `call_ha_service` repeatedly.
+   - Example: "2 kere aç-kapa" (on-off twice) corresponds to 4 `toggle` iterations when starting
+     from `off`. Check initial state if unsure, then call `execute_sequential_loop` and verify
+     the final state with `assert_entity_state`.
+3. **Safety & Heating Protection**:
    - Respect HVAC setpoint bounds and window-open frost protection.
    - If a tool call is rejected by a safety guard (e.g., `window_open_protection` or
      `safety_bound_violation`), DO NOT attempt to bypass it; report the guard reason clearly.
-3. **Structured Output to Supervisor**:
+4. **Structured Output to Supervisor**:
    - Always summarize: (a) action executed, (b) entity_id, and (c) the `assert_entity_state`
      verification outcome.
 """.strip()
+
+_HA_MCP_DISCOVERY_PROMPT = """
+
+### Entity Discovery Policy (HA-MCP Active)
+- NEVER guess or brute-force `entity_id` values with `get_ha_entity_state`.
+- When the exact canonical `entity_id` is not explicitly given or listed in Configured Entity
+  Aliases, ALWAYS search first using `ha_mcp_ha_search` (or `ha_mcp_ha_list_floors_areas` /
+  `ha_mcp_ha_get_overview`).
+- Search tips for speed and accuracy:
+  - Always set `limit=50` in `ha_mcp_ha_search` (the default limit of 10 often fills up with
+    `binary_sensor.*` or `sensor.*` entities).
+  - If searching in a non-English home (e.g., Turkish: "mutfak", "oturma odası"), search with the
+    original room/device keywords first (e.g., `query="mutfak"` or `query="mutfak isik"`).
+  - Real-world lights or appliances may belong to `switch.*` as well as `light.*`; check both or
+    omit `domain_filter` with `limit=50`.
+  - `ha_mcp_ha_search` already returns each entity's current `state`, so you do not need an extra
+    `get_ha_entity_state` call unless you specifically need detailed attributes.
+""".rstrip()
 
 
 def build_ha_mcp_client(config: AppConfig) -> MCPClient | None:
@@ -88,11 +112,12 @@ def build_ha_sub_agent(settings: SubAgentSettings, ctx: SubAgentBuildContext) ->
     """Build the stateless Home Assistant sub-agent and expose it via `.as_tool()`."""
     tools: list[Any] = list(ctx.ha_adapter.build_tools())
     mcp_client = build_ha_mcp_client(ctx.config)
+    prompt = _HA_BASE_SYSTEM_PROMPT
     if mcp_client is not None:
         tools.append(mcp_client)
+        prompt += _HA_MCP_DISCOVERY_PROMPT
 
     alias_map = ctx.config.home_assistant.entity_aliases
-    prompt = _HA_BASE_SYSTEM_PROMPT
     if alias_map:
         alias_lines = "\n".join(f"- `{alias}` -> `{entity}`" for alias, entity in sorted(alias_map.items()))
         prompt += f"\n\n### Configured Entity Aliases\n{alias_lines}\n"

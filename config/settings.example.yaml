@@ -137,9 +137,20 @@ home_assistant:
     dining_light: "light.dining_room_main"
   mcp:
     enabled: true
-    transport: "sse"
+    transport: "streamable_http"
     startup_timeout_sec: 10
-    tool_allowlist: []
+    tool_allowlist:
+      - "ha_search"
+      - "ha_get_overview"
+      - "ha_list_floors_areas"
+      - "ha_get_state"
+      - "ha_get_entity"
+      - "ha_get_device"
+      - "ha_get_history"
+      - "ha_list_services"
+      - "ha_get_zone"
+      - "ha_eval_template"
+      - "ha_get_logs"
     tool_denylist: []
 
 infra:
