@@ -101,6 +101,7 @@ memory:
   local_embedding_dimensions: 256
   max_rules_injected: 10
   allow_agent_core_invariants: false
+  agent_min_occurrences: 2
   seed_lessons:
     - domain: "ha"
       core: true

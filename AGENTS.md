@@ -1,5 +1,5 @@
 # Homelab & Smart Home Multi-Agent Mesh (AGENTS.md)
-*Sürüm: v1.0.0 | Son Güncelleme: 2026-11-11*
+*Sürüm: v1.1.0 | Son Güncelleme: 2026-11-13 (Production Hardening)*
 
 Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başlamamak; mimariyi, tasarım kararlarını, dosya yapısını, güvenlik kurallarını ve anlık durumu eksiksiz hatırlamak için hazırlanmış operasyonel rehberdir.
 
@@ -78,10 +78,19 @@ Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başl
 - `safety.protected_containers` (örn: `tailscale`, `pihole`, `homelab-agent-mesh`) üzerinde `stop`, `restart`, `pause` işlemleri kesinlikle yasaktır; çağrıldığında `ProtectedResourceViolationError` fırlatılır.
 - Aynı koruma `safety.protected_vm_ids` ile Proxmox misafirleri için de geçerlidir.
 
-### C. İki Aşamalı Onay Mekanizması (Two-Phase Commit)
+### C. İki Aşamalı Onay Mekanizması (Two-Phase Commit & Multi-Interrupt)
 - `safety.destructive_tools_requiring_approval` listesinde tanımlı işlemler (`restart_container`, `reboot_node`, `delete_automation` vb.) çağrıldığında Strands `Confirm` müdahalesi tetiklenir.
 - Sistem istemciye `{"type": "intervention_required", "approval_id": "..."}` SSE paketi gönderir ve işlemi duraklatır.
 - İşlem ancak kullanıcı `/api/v1/interventions/approve` uç noktasına `{"approval_id": "...", "approved": true}` gönderdiğinde kaldığı yerden devam eder.
+- **Multi-Interrupt State Resumption:** Tek promptta birden fazla yıkıcı işlem istendiğinde (örn. container restart + Proxmox LXC reboot), sistem hem ardışık (sequential) hem eşzamanlı (batch) onay kuyruğunu (`resolved_interrupt_responses`) korur; her onay çözüldüğünde sonraki adımı aksatmadan yürütür.
+
+### D. Bellek Zehirlenmesi Kalkanı & Tekrar Eşiği (Anti-Poisoning & Memory Drift Guard)
+- Geçici ağ/zaman aşımı hataları (`TimeoutError`, `ConnectionError`, `circuit_open`, `zaman aşımı`) `MemoryPoisoningError` ile `lessons_learned` tablosuna yazılması kesinlikle engellenir.
+- Ajan tarafından öğrenilen semantik kurallar enjekte edilmeden önce en az `agent_min_occurrences` (varsayılan: 2) kez gözlemlenmelidir; ilk gözlem aday (`active=False`) olarak bekletilir.
+
+### E. Asenkron I/O ve Paralel Docker Telemetrisi
+- Çoklu konteyner telemetri sorguları (`_list_containers_sync`) `ThreadPoolExecutor` ve `infra.docker_stats_concurrency` ile paralel toplanır.
+- SQLite başlatma ve semantik skorlama `asyncio.to_thread` üzerinden izole edilerek FastAPI SSE event loop'u sıfır bloklama ile çalışır.
 
 ---
 
@@ -126,12 +135,16 @@ homelab-agent-mesh/
 
 ---
 
-## 5. Projenin Güncel Durumu (2026-11-11 İtibarıyla)
+## 5. Projenin Güncel Durumu (2026-11-13 İtibarıyla)
 
 - [x] Tüm modüller tamamen yazıldı, modüler ve `strict` tip uyumlu.
-- [x] `mypy --strict src` kontrolünden 22/22 dosya başarıyla geçti (0 hata).
-- [x] `pytest tests/test_orchestrator.py` ile 3 katmanlı hafıza, güvenlik kalkanları ve SSE Two-Phase Commit akışları doğrulandı (3/3 test passed).
-- [x] Git deposuna 6 mantıksal commit olarak işlendi (asla gizli anahtar sızdırılmadı).
+- [x] `mypy --strict src tests` kontrolünden 23/23 dosya başarıyla geçti (0 hata).
+- [x] `pytest tests/test_orchestrator.py` ile 3 katmanlı hafıza, güvenlik kalkanları, bellek zehirlenmesi kalkanı, paralel telemetri ve çoklu onay (multi-interrupt) akışları doğrulandı (6/6 test passed).
+- [x] 3 temel üretim ortamı sertleştirmesi (production hardening) tamamlandı:
+  1. Memory Drift / Anti-Poisoning guard & occurrence threshold (2x)
+  2. Async non-blocking I/O & parallel container stats (concurrency=4)
+  3. Multi-interrupt sequential & batch state resumption
+- [x] Git deposuna temiz ve mantıksal commit'ler olarak işlendi (asla gizli anahtar sızdırılmadı).
 - [x] Kullanıcı yerel diski üzerinde `.env` ve `config/settings.yaml` dosyalarını oluşturdu.
 
 ---

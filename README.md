@@ -1,4 +1,4 @@
-# Homelab & Smart Home Multi-Agent Orchestrator (`homelab-agent-mesh` v1.0)
+# Homelab & Smart Home Multi-Agent Orchestrator (`homelab-agent-mesh` v1.1)
 
 Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homelab & Smart Home Orchestrator** built on **Python 3.12+ (`asyncio`)**, **Strands Agents SDK**, and **FastAPI Server-Sent Events (SSE)**.
 
@@ -14,15 +14,17 @@ Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homela
 - **Hierarchical Supervisor & Agent-as-a-Tool (`.as_tool()`):**
   - Root `Supervisor` agent maintains a sliding window conversation buffer (`SlidingWindowConversationManager`) and delegates domain tasks to stateless specialist sub-agents (`HASubAgent` and `InfraSubAgent`).
   - Open/Closed plugin registry (`@register_sub_agent`) allows adding new specialist agents without modifying core orchestrator code.
-- **3-Tier Zero-Miss Reflection Store (SQLite + Embeddings):**
+- **3-Tier Zero-Miss Reflection Store (SQLite + Embeddings) & Memory Drift Guard:**
   - **Tier 1 (Bounded Context Isolation):** Filters lessons by domain (`ha` vs `infra`).
   - **Tier 2 (Core Invariants):** Lessons marked `is_core_invariant = 1` are **always** injected (0% miss rate).
   - **Tier 3 (Semantic Similarity):** Cosine similarity search via Google GenAI embeddings (`text-embedding-004`) with an automatic zero-RAM local hashed n-gram fallback.
+  - **Anti-Poisoning & Repetition Threshold:** Rejects transient network/timeout/circuit-breaker failures (`MemoryPoisoningError`) and stages agent lessons until observed `agent_min_occurrences` (default: 2) times before activation.
 - **Actor-Critic & Deterministic Post-Action State Assertion:**
   - `HomeAssistantWSAdapter` provides rapid sub-second sequential WebSocket loops (`execute_sequential_loop`), allow-listed raw event firing (`fire_custom_ha_event`), and post-action verification (`assert_entity_state` -> `StateAssertionSuccess` / `StateAssertionFailure`).
-- **Pre-Condition Guard Clauses & Two-Phase Commit (Human-in-the-Loop):**
+- **Pre-Condition Guard Clauses, Parallel Telemetry & Multi-Interrupt Two-Phase Commit:**
   - Blocks out-of-range HVAC setpoints, respects window-open frost protection (`window_open_guard_temp` + contact sensors), and prevents stopping/restarting protected containers or VMs (`ProtectedResourceViolationError`).
-  - Intercepts operations listed in `safety.destructive_tools_requiring_approval` via Strands `Confirm` interventions, streams an `intervention_required` SSE packet with `approval_id`, and pauses execution until confirmed via `POST /api/v1/interventions/approve`.
+  - Parallelizes Docker container telemetry stats via `ThreadPoolExecutor` and `infra.docker_stats_concurrency`.
+  - Intercepts operations listed in `safety.destructive_tools_requiring_approval` via Strands `Confirm` interventions, supports sequential and batch multi-interrupt resumption (`resolved_interrupt_responses`), streams an `intervention_required` SSE packet with `approval_id`, and pauses execution until confirmed via `POST /api/v1/interventions/approve`.
 
 ## Directory Structure
 

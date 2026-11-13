@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
 
 import docker
@@ -191,6 +192,32 @@ class HomelabInfraToolkit:
         async with self._docker_breaker.guard():
             return await asyncio.to_thread(self._list_containers_sync, include_stopped)
 
+    def _inspect_single_container(self, container: Any) -> dict[str, Any]:
+        name = str(getattr(container, "name", "")).lstrip("/")
+        status = str(getattr(container, "status", "unknown"))
+        cpu_pct = 0.0
+        mem_mb = 0.0
+        mem_limit_mb = 0.0
+        if status == "running":
+            try:
+                stats = container.stats(stream=False)
+                cpu_pct = _compute_cpu_percent(stats)
+                mem_stats = stats.get("memory_stats") or {}
+                mem_mb = round(float(mem_stats.get("usage", 0)) / (1024**2), 2)
+                mem_limit_mb = round(float(mem_stats.get("limit", 0)) / (1024**2), 2)
+            except Exception as exc:
+                logger.debug("container=<%s> | stats fetch skipped: %s", name, exc)
+
+        return {
+            "name": name,
+            "short_id": getattr(container, "short_id", ""),
+            "status": status,
+            "cpu_percent": cpu_pct,
+            "memory_mb": mem_mb,
+            "memory_limit_mb": mem_limit_mb,
+            "protected": self._guards.is_protected_container(name),
+        }
+
     def _list_containers_sync(self, include_stopped: bool) -> list[dict[str, Any]]:
         client = self._get_docker()
         try:
@@ -198,35 +225,15 @@ class HomelabInfraToolkit:
         except DockerException as exc:
             raise DockerBackendError(f"Failed to list Docker containers: {exc}") from exc
 
-        results: list[dict[str, Any]] = []
-        for container in containers:
-            name = str(getattr(container, "name", "")).lstrip("/")
-            status = str(getattr(container, "status", "unknown"))
-            cpu_pct = 0.0
-            mem_mb = 0.0
-            mem_limit_mb = 0.0
-            if status == "running":
-                try:
-                    stats = container.stats(stream=False)
-                    cpu_pct = _compute_cpu_percent(stats)
-                    mem_stats = stats.get("memory_stats") or {}
-                    mem_mb = round(float(mem_stats.get("usage", 0)) / (1024**2), 2)
-                    mem_limit_mb = round(float(mem_stats.get("limit", 0)) / (1024**2), 2)
-                except Exception as exc:
-                    logger.debug("container=<%s> | stats fetch skipped: %s", name, exc)
+        if not containers:
+            return []
 
-            results.append(
-                {
-                    "name": name,
-                    "short_id": getattr(container, "short_id", ""),
-                    "status": status,
-                    "cpu_percent": cpu_pct,
-                    "memory_mb": mem_mb,
-                    "memory_limit_mb": mem_limit_mb,
-                    "protected": self._guards.is_protected_container(name),
-                }
-            )
-        return results
+        max_workers = max(1, min(self._infra_cfg.docker_stats_concurrency, len(containers)))
+        if max_workers == 1:
+            return [self._inspect_single_container(container) for container in containers]
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            return list(pool.map(self._inspect_single_container, containers))
 
     # ------------------------------------------------------------------
     # Tool 3: Manage container with ProtectedResourceViolationError guard

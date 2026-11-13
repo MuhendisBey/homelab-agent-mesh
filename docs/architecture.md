@@ -1,4 +1,4 @@
-# Architecture Specification & Engineering Guide (v1.0)
+# Architecture Specification & Engineering Guide (v1.1)
 *Homelab & Smart Home Multi-Agent Mesh (`homelab-agent-mesh`)*
 
 ---
@@ -157,9 +157,17 @@ erDiagram
         string rule_content "Actionable rule text"
         string embedding_model "Model tag (e.g. 'gemini-embedding-001')"
         text embedding_json "Normalized vector array [float]"
+        int occurrence_count "Observation count (Default 1)"
+        int min_occurrences "Threshold to activate (Default 1 or agent_min_occurrences)"
         timestamp created_at "Default CURRENT_TIMESTAMP"
     }
 ```
+
+### Anti-Poisoning & Memory Drift Guard (`MemoryPoisoningError`)
+To prevent transient outages (e.g. `TimeoutError`, `ConnectionError`, `circuit_open`) from poisoning the reflection database with false negative rules (such as *"Device X is unreachable, never try again"*):
+- Every candidate rule passes through `validate_lesson_content()` before SQLite storage.
+- Agent-discovered semantic rules require `occurrence_count >= min_occurrences` (default `2`) before participating in cosine retrieval, while human-configured seed invariants activate immediately (`min_occurrences = 1`).
+- Near-duplicate detections (`cosine_similarity >= 0.88`) increment `occurrence_count` even when the agent phrases the same root observation with minor vocabulary differences.
 
 ---
 
@@ -346,4 +354,7 @@ flowchart TD
 | **No Hallucinated Actions** | Post-execution `assert_entity_state` polling/subscription | `StateAssertionSuccess` / `StateAssertionFailure` audit |
 | **Runaway Action Prevention** | Loop bounds (`max_loop_iterations`, `min_loop_delay_ms`) | Pre-condition checks in `GuardRails` |
 | **Low Resource Footprint** | Multi-stage Docker build, zero heavy vector DB, local embed fallback | Running RSS benchmark (<80 MB RAM) |
+| **Memory Drift Immunity** | Anti-poisoning regex guard (`MemoryPoisoningError`) + 2x repetition threshold | Automated test `test_reflection_store_anti_poisoning_and_repetition_threshold` |
+| **Multi-Interrupt Resumption** | Batch and sequential HITL resumption buffer (`resolved_interrupt_responses`) | Automated test `test_multi_interrupt_sequential_and_batch_resumption` |
+| **Non-Blocking Telemetry I/O** | `ThreadPoolExecutor` parallel stats + async SQLite WAL lifecycle | Automated test `test_infra_toolkit_parallel_docker_stats` |
 

@@ -142,6 +142,11 @@ class MemorySettings(_StrictModel):
     local_embedding_dimensions: int = Field(gt=0)
     max_rules_injected: int = Field(gt=0)
     allow_agent_core_invariants: bool = False
+    agent_min_occurrences: int = Field(
+        default=2,
+        ge=1,
+        description="Number of times an agent must observe a non-core lesson before it activates in retrieval.",
+    )
     seed_lessons: list[SeedLesson] = Field(default_factory=list)
 
 

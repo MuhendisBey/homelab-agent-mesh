@@ -70,12 +70,16 @@ You are the Root Supervisor Agent of the Homelab & Smart Home Orchestrator.
    - Never report an action as successful if its state assertion failed or was blocked by a
      safety guard.
 3. **Self-Healing Reflection Memory**:
-   - When a recurring device quirk, entity mapping, or recovery procedure is learned or
-     confirmed by the user, call `record_lesson_learned` with the appropriate domain (`ha`
-     or `infra`) so future tasks automatically apply it.
+   - When a recurring device quirk, entity mapping, or logical parameter fix is confirmed,
+     call `record_lesson_learned` with the appropriate domain (`ha` or `infra`) so future
+     tasks automatically apply it.
+   - NEVER record transient network, timeout, or circuit-breaker errors (e.g., `TimeoutError`,
+     `ConnectionError`, `circuit_open`, or temporary reachability failures) into memory.
 4. **Human-in-the-Loop Interventions**:
-   - Destructive operations automatically pause for human confirmation. If an operation is
-     denied by the user, acknowledge the denial and do not retry the denied action.
+   - Destructive operations automatically pause for human confirmation. If a user request
+     contains multiple destructive operations, preserve and execute every remaining step in
+     order as each `approval_id` is resolved.
+   - If an operation is denied by the user, acknowledge the denial and do not retry the denied action.
 """.strip()
 
 
@@ -206,6 +210,7 @@ class SessionOrchestrator:
     keepalive_sec: float
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending_approvals: dict[str, PendingApproval] = field(default_factory=dict)
+    resolved_interrupt_responses: list[dict[str, Any]] = field(default_factory=list)
     last_active_monotonic: float = field(default_factory=time.monotonic)
 
     def touch(self) -> None:
@@ -259,19 +264,48 @@ class SessionOrchestrator:
             )
 
         effective_approved = approved and not pending.is_expired
-        resume_payload = [
-            {
-                "interruptResponse": {
-                    "interruptId": pending.interrupt_id,
-                    "response": {
-                        "approved": effective_approved,
-                        "reason": reason or ("expired" if pending.is_expired else None),
-                    },
-                }
+        response_item: dict[str, Any] = {
+            "interruptResponse": {
+                "interruptId": pending.interrupt_id,
+                "response": {
+                    "approved": effective_approved,
+                    "reason": reason or ("expired" if pending.is_expired else None),
+                },
             }
-        ]
+        }
         async with self.lock:
             self.touch()
+            self.resolved_interrupt_responses.append(response_item)
+            expired_siblings = self.prune_expired_approvals()
+            for expired_item in expired_siblings:
+                self.resolved_interrupt_responses.append(
+                    {
+                        "interruptResponse": {
+                            "interruptId": expired_item.interrupt_id,
+                            "response": {
+                                "approved": False,
+                                "reason": "expired",
+                            },
+                        }
+                    }
+                )
+
+            if self.pending_approvals:
+                yield SessionStartedEvent(session_id=self.session_id)
+                yield InterventionResolvedEvent(
+                    approval_id=approval_id,
+                    approved=effective_approved,
+                    expired=pending.is_expired,
+                )
+                yield DoneEvent(
+                    session_id=self.session_id,
+                    stop_reason="interrupt",
+                    pending_approvals=list(self.pending_approvals.keys()),
+                )
+                return
+
+            resume_payload = list(self.resolved_interrupt_responses)
+            self.resolved_interrupt_responses.clear()
             yield InterventionResolvedEvent(
                 approval_id=approval_id,
                 approved=effective_approved,
@@ -299,7 +333,13 @@ class SessionOrchestrator:
                         result = raw_event["result"]
                         stop_reason = str(getattr(result, "stop_reason", "end_turn"))
                         interrupts = getattr(result, "interrupts", None) or []
+                        existing_interrupt_ids = {
+                            p.interrupt_id for p in self.pending_approvals.values()
+                        }
                         for intr in interrupts:
+                            if intr.id in existing_interrupt_ids:
+                                continue
+                            existing_interrupt_ids.add(intr.id)
                             approval = _parse_interrupt_metadata(
                                 intr,
                                 ttl_sec=self.approval_timeout_sec,
@@ -406,6 +446,7 @@ class SupervisorRuntime:
             store=self._memory_store,
             allowed_domains=allowed_domains,
             allow_core_invariants=self._config.memory.allow_agent_core_invariants,
+            agent_min_occurrences=self._config.memory.agent_min_occurrences,
         )
 
         prompt = _SUPERVISOR_BASE_PROMPT

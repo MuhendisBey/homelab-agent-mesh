@@ -34,6 +34,8 @@ class LessonRecord(BaseModel):
     domain: str
     rule_content: str
     is_core_invariant: bool
+    occurrence_count: int = 1
+    active: bool = True
     created_at: datetime | None = None
     created: bool = True
 
@@ -79,7 +81,13 @@ class BaseMemoryStore(ABC):
         return (await self.retrieve(domain, query)).as_list()
 
     @abstractmethod
-    async def record_lesson(self, domain: str, rule_content: str, is_core_invariant: bool = False) -> LessonRecord:
+    async def record_lesson(
+        self,
+        domain: str,
+        rule_content: str,
+        is_core_invariant: bool = False,
+        min_occurrences: int = 1,
+    ) -> LessonRecord:
         """Persist a lesson (idempotent on ``(domain, rule_content)``)."""
 
     @abstractmethod

@@ -66,6 +66,12 @@ class DisallowedEventError(GuardViolationError):
     code = "disallowed_event"
 
 
+class MemoryPoisoningError(GuardViolationError):
+    """A transient network/timeout error or negative reachability rule was rejected from memory."""
+
+    code = "memory_poisoning_blocked"
+
+
 # --- Circuit breaker -------------------------------------------------------------------
 
 

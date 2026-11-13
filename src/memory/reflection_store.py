@@ -26,12 +26,36 @@ from strands import tool
 from strands.types.tools import AgentTool
 
 from src.core.config import AppConfig
-from src.core.exceptions import GuardViolationError
+from src.core.exceptions import GuardViolationError, MemoryPoisoningError
 from src.memory.base import BaseEmbedder, BaseMemoryStore, LessonRecord, RetrievedRules
 
 logger = logging.getLogger(__name__)
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
+_TRANSIENT_ERROR_RE = re.compile(
+    r"\b("
+    r"timeout|timed\s*out|time[- ]out|timeout_error|timeouterror|"
+    r"connection\s*(refused|reset|error|aborted|closed|failed)|connectionerror|"
+    r"circuit[_\s]*open|circuit\s*breaker|devre\s*kesici|"
+    r"zaman\s*a[şs][ıi]m[ıi]|ba[ğg]lant[ıi]\s*hatas[ıi]|"
+    r"502\s*bad\s*gateway|503\s*service\s*unavailable|504\s*gateway\s*timeout|"
+    r"temporarily\s*unavailable|anl[ıi]k\s*hata|ge[çc]ici\s*hata"
+    r")\b|"
+    r"\b(unreachable|eri[şs]ilemiyor|ula[şs][ıi]lam[ıi]yor)\b.*\b(do\s*not|don't|never|bir\s*daha|tekrar|asla)\b|"
+    r"\b(do\s*not|don't|never|bir\s*daha|tekrar|asla)\b.*\b(unreachable|eri[şs]ilemiyor|ula[şs][ıi]lam[ıi]yor)\b",
+    re.IGNORECASE,
+)
+_NEAR_DUPLICATE_THRESHOLD = 0.88
+
+
+def validate_lesson_content(rule_content: str) -> None:
+    """Reject transient network/timeout/circuit-breaker failures to prevent memory drift."""
+    match = _TRANSIENT_ERROR_RE.search(rule_content)
+    if match:
+        raise MemoryPoisoningError(
+            f"Refused to persist transient/reachability error pattern '{match.group(0)}' into reflection store.",
+            matched_pattern=match.group(0),
+        )
 
 
 def _l2_normalize(vec: list[float]) -> list[float]:
@@ -159,17 +183,22 @@ class ReflectionStore(BaseMemoryStore):
         self.max_rules_injected = max_rules_injected
         self._fallback_embedder = LocalHashedNgramEmbedder(dimensions=local_fallback_dimensions)
         self._write_lock = asyncio.Lock()
-        self._init_db()
+        self._db_initialized = False
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         return conn
 
+    def _ensure_db_sync(self) -> None:
+        if not self._db_initialized:
+            self._init_db()
+
     def _init_db(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS lessons_learned (
@@ -179,6 +208,8 @@ class ReflectionStore(BaseMemoryStore):
                     rule_content TEXT NOT NULL,
                     embedding_model TEXT NOT NULL DEFAULT '',
                     embedding_json TEXT NOT NULL,
+                    occurrence_count INTEGER NOT NULL DEFAULT 1,
+                    min_occurrences INTEGER NOT NULL DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(domain, rule_content)
                 )
@@ -190,14 +221,20 @@ class ReflectionStore(BaseMemoryStore):
                 ON lessons_learned (domain, is_core_invariant)
                 """
             )
-            # Ensure backward compatibility if table was created without embedding_model column
+            # Ensure backward compatibility with pre-existing schemas
             cols = {row[1] for row in conn.execute("PRAGMA table_info(lessons_learned)").fetchall()}
             if "embedding_model" not in cols:
                 conn.execute("ALTER TABLE lessons_learned ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''")
+            if "occurrence_count" not in cols:
+                conn.execute("ALTER TABLE lessons_learned ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1")
+            if "min_occurrences" not in cols:
+                conn.execute("ALTER TABLE lessons_learned ADD COLUMN min_occurrences INTEGER NOT NULL DEFAULT 1")
+        self._db_initialized = True
 
     async def initialize(self) -> None:
-        """Verify schema and re-embed any rows whose embedding_model does not match."""
-        await asyncio.to_thread(self._init_db)
+        """Verify schema and enable WAL mode asynchronously."""
+        async with self._write_lock:
+            await asyncio.to_thread(self._init_db)
 
     async def _embed_with_fallback(self, text: str) -> tuple[list[float], str, bool]:
         try:
@@ -231,17 +268,34 @@ class ReflectionStore(BaseMemoryStore):
             return RetrievedRules(core=core_rules, semantic=[], degraded=False)
 
         query_vec, query_model, degraded = await self._embed_with_fallback(query)
+        semantic_rules = await asyncio.to_thread(
+            self._score_semantic_rows_sync,
+            non_core_rows,
+            query_vec,
+            query_model,
+            len(core_rules),
+        )
+        return RetrievedRules(core=core_rules, semantic=semantic_rules, degraded=degraded)
+
+    def _score_semantic_rows_sync(
+        self,
+        non_core_rows: list[tuple[str, str, str]],
+        query_vec: list[float],
+        query_model: str,
+        core_count: int,
+    ) -> list[str]:
         scored: list[tuple[float, str]] = []
         for rule_content, emb_model, emb_json in non_core_rows:
-            rule_vec = self._resolve_rule_vector(rule_content, emb_model, emb_json, query_model, len(query_vec))
+            rule_vec = self._resolve_rule_vector(
+                rule_content, emb_model, emb_json, query_model, len(query_vec)
+            )
             sim = _cosine_similarity(query_vec, rule_vec)
             if sim >= self.similarity_threshold:
                 scored.append((sim, rule_content))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        budget = max(0, self.max_rules_injected - len(core_rules))
-        semantic_rules = [content for _, content in scored[:budget]]
-        return RetrievedRules(core=core_rules, semantic=semantic_rules, degraded=degraded)
+        budget = max(0, self.max_rules_injected - core_count)
+        return [content for _, content in scored[:budget]]
 
     def _resolve_rule_vector(
         self,
@@ -270,17 +324,19 @@ class ReflectionStore(BaseMemoryStore):
         return []
 
     def _fetch_domain_rows(self, domain: str) -> list[tuple[str, int, str, str]]:
+        self._ensure_db_sync()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 SELECT rule_content, is_core_invariant, embedding_model, embedding_json
                 FROM lessons_learned
                 WHERE domain = ?
+                  AND (is_core_invariant = 1 OR occurrence_count >= min_occurrences)
                 ORDER BY id ASC
                 """,
                 (domain,),
             )
-            return [( str(r[0]), int(r[1]), str(r[2]), str(r[3]) ) for r in cursor.fetchall()]
+            return [(str(r[0]), int(r[1]), str(r[2]), str(r[3])) for r in cursor.fetchall()]
 
     async def get_relevant_rules(self, domain: str, query: str) -> list[str]:
         """Blueprint-compatible helper returning ``[CORE INVARIANT] ...`` + semantic matches."""
@@ -292,13 +348,17 @@ class ReflectionStore(BaseMemoryStore):
         domain: str,
         rule_content: str,
         is_core_invariant: bool = False,
+        min_occurrences: int = 1,
     ) -> LessonRecord:
-        """Persist a lesson learned idempotently."""
+        """Persist a lesson learned idempotently with anti-poisoning and occurrence gating."""
         norm_domain = domain.strip().lower()
         clean_rule = rule_content.strip()
         if not norm_domain or not clean_rule:
             raise ValueError("Both domain and rule_content must be non-empty.")
 
+        validate_lesson_content(clean_rule)
+
+        effective_min = 1 if is_core_invariant else max(1, int(min_occurrences))
         vec, model_name, _ = await self._embed_with_fallback(clean_rule)
         emb_json = json.dumps(vec)
         async with self._write_lock:
@@ -309,7 +369,46 @@ class ReflectionStore(BaseMemoryStore):
                 1 if is_core_invariant else 0,
                 model_name,
                 emb_json,
+                vec,
+                effective_min,
             )
+
+    def _find_near_duplicate_row(
+        self,
+        conn: sqlite3.Connection,
+        domain: str,
+        model_name: str,
+        query_vec: list[float],
+    ) -> tuple[int, int, str, int, int, Any] | None:
+        candidates = conn.execute(
+            """
+            SELECT id, is_core_invariant, rule_content, embedding_model, embedding_json,
+                   occurrence_count, min_occurrences, created_at
+            FROM lessons_learned
+            WHERE domain = ? AND is_core_invariant = 0
+            ORDER BY id ASC
+            """,
+            (domain,),
+        ).fetchall()
+        best_sim = 0.0
+        best_row: tuple[int, int, str, int, int, Any] | None = None
+        for row in candidates:
+            cand_id = int(row[0])
+            cand_core = int(row[1])
+            cand_rule = str(row[2])
+            cand_model = str(row[3])
+            cand_json = str(row[4])
+            cand_occ = int(row[5])
+            cand_min = int(row[6])
+            cand_created = row[7]
+            cand_vec = self._resolve_rule_vector(
+                cand_rule, cand_model, cand_json, model_name, len(query_vec)
+            )
+            sim = _cosine_similarity(query_vec, cand_vec)
+            if sim >= _NEAR_DUPLICATE_THRESHOLD and sim > best_sim:
+                best_sim = sim
+                best_row = (cand_id, cand_core, cand_rule, cand_occ, cand_min, cand_created)
+        return best_row
 
     def _upsert_row(
         self,
@@ -318,38 +417,67 @@ class ReflectionStore(BaseMemoryStore):
         is_core: int,
         model_name: str,
         emb_json: str,
+        vec: list[float],
+        effective_min: int,
     ) -> LessonRecord:
+        self._ensure_db_sync()
         with self._connect() as conn:
-            existing = conn.execute(
+            exact = conn.execute(
                 """
-                SELECT id, is_core_invariant, created_at
+                SELECT id, is_core_invariant, rule_content, occurrence_count, min_occurrences, created_at
                 FROM lessons_learned
                 WHERE domain = ? AND rule_content = ?
                 """,
                 (domain, rule_content),
             ).fetchone()
+            existing: tuple[int, int, str, int, int, Any] | None
+            if exact is not None:
+                existing = (
+                    int(exact[0]),
+                    int(exact[1]),
+                    str(exact[2]),
+                    int(exact[3]),
+                    int(exact[4]),
+                    exact[5],
+                )
+            elif is_core == 0:
+                existing = self._find_near_duplicate_row(conn, domain, model_name, vec)
+            else:
+                existing = None
+
             if existing is not None:
-                row_id, existing_core, created_at = int(existing[0]), int(existing[1]), existing[2]
+                row_id, existing_core, existing_rule, existing_count, existing_min, created_at = existing
                 new_core = 1 if (existing_core == 1 or is_core == 1) else 0
-                if new_core != existing_core:
-                    conn.execute(
-                        "UPDATE lessons_learned SET is_core_invariant = ? WHERE id = ?",
-                        (new_core, row_id),
-                    )
+                new_count = existing_count + 1
+                new_min = 1 if new_core == 1 else min(existing_min, effective_min)
+                conn.execute(
+                    """
+                    UPDATE lessons_learned
+                    SET is_core_invariant = ?, occurrence_count = ?, min_occurrences = ?
+                    WHERE id = ?
+                    """,
+                    (new_core, new_count, new_min, row_id),
+                )
                 return LessonRecord(
                     id=row_id,
                     domain=domain,
-                    rule_content=rule_content,
+                    rule_content=existing_rule,
                     is_core_invariant=bool(new_core),
+                    occurrence_count=new_count,
+                    active=bool(new_core == 1 or new_count >= new_min),
                     created_at=created_at,
                     created=False,
                 )
+
             cursor = conn.execute(
                 """
-                INSERT INTO lessons_learned (domain, is_core_invariant, rule_content, embedding_model, embedding_json)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO lessons_learned (
+                    domain, is_core_invariant, rule_content, embedding_model, embedding_json,
+                    occurrence_count, min_occurrences
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (domain, is_core, rule_content, model_name, emb_json),
+                (domain, is_core, rule_content, model_name, emb_json, 1, effective_min),
             )
             new_id = int(cursor.lastrowid or 0)
             return LessonRecord(
@@ -357,6 +485,8 @@ class ReflectionStore(BaseMemoryStore):
                 domain=domain,
                 rule_content=rule_content,
                 is_core_invariant=bool(is_core),
+                occurrence_count=1,
+                active=bool(is_core == 1 or 1 >= effective_min),
                 created=True,
             )
 
@@ -374,6 +504,7 @@ def create_record_lesson_tool(
     store: BaseMemoryStore,
     allowed_domains: Iterable[str],
     allow_core_invariants: bool = False,
+    agent_min_occurrences: int = 2,
 ) -> AgentTool:
     """Build the Strands tool ``record_lesson_learned`` bound to ``store``."""
     valid_domains = {d.strip().lower() for d in allowed_domains}
@@ -381,8 +512,9 @@ def create_record_lesson_tool(
     @tool(
         name="record_lesson_learned",
         description=(
-            "Persist a self-healing lesson learned into the 3-tier reflection store when an error, "
-            "device quirk, or state assertion failure is diagnosed and resolved."
+            "Persist a self-healing lesson learned (entity mapping or logical parameter quirk) "
+            "into the 3-tier reflection store. NEVER record transient network, timeout, or "
+            "circuit-breaker errors (e.g. TimeoutError, ConnectionError, unreachable device)."
         ),
     )
     async def record_lesson_learned(
@@ -404,16 +536,20 @@ def create_record_lesson_tool(
                 domain=domain,
             )
         promote_core = bool(is_core_invariant and allow_core_invariants)
+        min_occ = 1 if promote_core else max(1, int(agent_min_occurrences))
         record = await store.record_lesson(
             domain=norm_domain,
             rule_content=rule_content,
             is_core_invariant=promote_core,
+            min_occurrences=min_occ,
         )
         return {
             "id": record.id,
             "domain": record.domain,
             "rule_content": record.rule_content,
             "is_core_invariant": record.is_core_invariant,
+            "occurrence_count": record.occurrence_count,
+            "active": record.active,
             "created": record.created,
         }
 
