@@ -43,6 +43,8 @@ from src.core.events import (
     SwitchableEmitter,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    reset_active_request_emitter,
+    set_active_request_emitter,
 )
 from src.core.exceptions import (
     HomelabAgentError,
@@ -323,6 +325,7 @@ class SessionOrchestrator:
 
         async def _producer() -> None:
             stop_reason = "end_turn"
+            token = set_active_request_emitter(self.emitter)
             try:
                 async for raw_event in self.agent.stream_async(agent_input):
                     if "data" in raw_event and isinstance(raw_event["data"], str):
@@ -365,6 +368,7 @@ class SessionOrchestrator:
                 stop_reason = "error"
                 sink.emit(ErrorEvent(code="internal_error", message=str(exc)))
             finally:
+                reset_active_request_emitter(token)
                 # Allow any async generator cleanup on sub-agents to release locks cleanly
                 await asyncio.sleep(0)
                 sink.emit(

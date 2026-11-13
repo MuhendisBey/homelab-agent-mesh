@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "homelab-agent-mesh"
-version = "1.0.0"
+version = "1.2.0"
 description = "Production-grade Hierarchical Multi-Agent Homelab & Smart Home Orchestrator built with Strands Agents SDK and FastAPI SSE."
 readme = "README.md"
 license = { text = "MIT" }

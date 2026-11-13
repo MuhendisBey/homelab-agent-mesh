@@ -23,6 +23,8 @@ from src.agents.factory import AgentFactory
 from src.agents.supervisor import SupervisorRuntime
 from src.api.routes import router as api_router
 from src.core.config import AppConfig, get_config
+from src.core.entity_resolver import EntityResolver
+from src.core.scheduler import ActionScheduler
 from src.memory.base import BaseMemoryStore
 from src.memory.reflection_store import ReflectionStore, build_embedder
 from src.tools.ha_ws_adapter import HomeAssistantWSAdapter
@@ -44,6 +46,8 @@ def create_app(
     ha_adapter: HomeAssistantWSAdapter | None = None,
     infra_toolkit: HomelabInfraToolkit | None = None,
     factory: AgentFactory | None = None,
+    entity_resolver: EntityResolver | None = None,
+    scheduler: ActionScheduler | None = None,
 ) -> FastAPI:
     """Application factory supporting dependency injection for tests and dry-run modes."""
     cfg = config or get_config()
@@ -51,9 +55,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        embedder = build_embedder(cfg)
         store = memory_store or ReflectionStore(
             db_path=cfg.sqlite_db_path,
-            embedder=build_embedder(cfg),
+            embedder=embedder,
             similarity_threshold=cfg.memory.similarity_threshold,
             max_rules_injected=cfg.memory.max_rules_injected,
             local_fallback_dimensions=cfg.memory.local_embedding_dimensions,
@@ -69,12 +74,30 @@ def create_app(
                 logger.info("reflection_store | seeded %d new lesson(s) from settings.yaml", seeded)
 
         ha = ha_adapter or HomeAssistantWSAdapter(cfg)
+        resolver = entity_resolver or EntityResolver(
+            config=cfg,
+            db_path=cfg.sqlite_db_path,
+            ha_backend=ha,
+            embedder=embedder,
+        )
+        if ha.entity_resolver is None:
+            ha.attach_entity_resolver(resolver)
+        await resolver.start()
+
+        sched = scheduler or ActionScheduler(
+            db_path=cfg.sqlite_db_path,
+            ha_adapter=ha,
+        )
+        await sched.start()
+
         infra = infra_toolkit or HomelabInfraToolkit(cfg)
         agent_factory = factory or AgentFactory(
             config=cfg,
             memory_store=store,
             ha_adapter=ha,
             infra_toolkit=infra,
+            entity_resolver=resolver,
+            scheduler=sched,
         )
         runtime = SupervisorRuntime(
             config=cfg,
@@ -85,6 +108,8 @@ def create_app(
         app.state.config = cfg
         app.state.memory_store = store
         app.state.ha_adapter = ha
+        app.state.entity_resolver = resolver
+        app.state.scheduler = sched
         app.state.infra_toolkit = infra
         app.state.factory = agent_factory
         app.state.runtime = runtime
@@ -98,6 +123,8 @@ def create_app(
         try:
             yield
         finally:
+            await sched.stop()
+            await resolver.stop()
             await ha.aclose()
             await infra.aclose()
             logger.info("homelab-agent-mesh shutdown complete")

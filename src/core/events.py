@@ -7,6 +7,7 @@ depending on the HTTP layer. ``src/api/schemas.py`` re-exports them.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import threading
 from datetime import UTC, datetime
@@ -101,6 +102,34 @@ class InterventionResolvedEvent(_BaseEvent):
     expired: bool = False
 
 
+class ScheduleCreatedEvent(_BaseEvent):
+    type: Literal["schedule_created"] = "schedule_created"
+    schedule_id: str
+    description: str
+    entity_id: str
+    domain: str
+    service: str
+    run_at_utc: datetime
+
+
+class ScheduleFiredEvent(_BaseEvent):
+    type: Literal["schedule_fired"] = "schedule_fired"
+    schedule_id: str
+    entity_id: str
+    domain: str
+    service: str
+    attempt: int
+
+
+class ScheduleResultEvent(_BaseEvent):
+    type: Literal["schedule_result"] = "schedule_result"
+    schedule_id: str
+    entity_id: str
+    status: Literal["done", "failed", "skipped", "cancelled"]
+    verified: bool = False
+    detail: str | None = None
+
+
 class ContentDeltaEvent(_BaseEvent):
     type: Literal["content_delta"] = "content_delta"
     agent: str
@@ -131,6 +160,9 @@ StreamEvent = Annotated[
     | MemoryInjectedEvent
     | InterventionRequiredEvent
     | InterventionResolvedEvent
+    | ScheduleCreatedEvent
+    | ScheduleFiredEvent
+    | ScheduleResultEvent
     | ContentDeltaEvent
     | ErrorEvent
     | DoneEvent,
@@ -194,3 +226,29 @@ class SwitchableEmitter:
         sink = self._sink
         if sink is not None:
             sink.emit(event)
+
+
+_ACTIVE_REQUEST_EMITTER: contextvars.ContextVar[SwitchableEmitter | QueueEventSink | None] = (
+    contextvars.ContextVar("active_request_emitter", default=None)
+)
+
+
+def set_active_request_emitter(
+    emitter: SwitchableEmitter | QueueEventSink | None,
+) -> contextvars.Token[SwitchableEmitter | QueueEventSink | None]:
+    """Bind the active request's event emitter to the current async context."""
+    return _ACTIVE_REQUEST_EMITTER.set(emitter)
+
+
+def reset_active_request_emitter(
+    token: contextvars.Token[SwitchableEmitter | QueueEventSink | None],
+) -> None:
+    """Restore the previous request event emitter context."""
+    _ACTIVE_REQUEST_EMITTER.reset(token)
+
+
+def emit_to_active_request(event: BaseModel) -> None:
+    """Emit an event to the currently active SSE request stream, if any."""
+    emitter = _ACTIVE_REQUEST_EMITTER.get()
+    if emitter is not None:
+        emitter.emit(event)

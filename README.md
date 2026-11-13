@@ -1,9 +1,11 @@
-# Homelab & Smart Home Multi-Agent Orchestrator (`homelab-agent-mesh` v1.1)
+# Homelab & Smart Home Multi-Agent Orchestrator (`homelab-agent-mesh` v1.2.0)
 
 Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homelab & Smart Home Orchestrator** built on **Python 3.12+ (`asyncio`)**, **Strands Agents SDK**, and **FastAPI Server-Sent Events (SSE)**.
 
-> 📖 **Comprehensive Architecture & Engineering Guide:**  
-> For full C4 diagrams, sequence diagrams, task decomposition models, and safety state machines, see **[docs/architecture.md](docs/architecture.md)**.
+> 📖 **Documentation:**  
+> - **Architecture & C4 / Sequence Diagrams:** **[docs/architecture.md](docs/architecture.md)**  
+> - **GitOps & Zero-Secret Deployment Strategy:** **[docs/deployment.md](docs/deployment.md)**  
+> - **v2.0 Plugin SDK & Diagnostics Roadmap:** **[docs/architecture_roadmap.md](docs/architecture_roadmap.md)**
 
 ## Key Architectural Highlights
 
@@ -21,6 +23,10 @@ Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homela
   - **Anti-Poisoning & Repetition Threshold:** Rejects transient network/timeout/circuit-breaker failures (`MemoryPoisoningError`) and stages agent lessons until observed `agent_min_occurrences` (default: 2) times before activation.
 - **Actor-Critic & Deterministic Post-Action State Assertion:**
   - `HomeAssistantWSAdapter` provides rapid sub-second sequential WebSocket loops (`execute_sequential_loop`), allow-listed raw event firing (`fire_custom_ha_event`), and post-action verification (`assert_entity_state` -> `StateAssertionSuccess` / `StateAssertionFailure`).
+- **Event-Driven Entity Grounding & CoALA Semantic Memory (P1):**
+  - Sub-15ms Turkish/English entity resolution (`EntityResolver`) combining a real-time Home Assistant WebSocket registry Grounding Index, dependency-free Turkish agglutinative morphology (`text_tr.py`), and CoALA `entity_memory` backed by SQLite WAL + Beta-Bernoulli confidence scoring (`verified_action` and user corrections).
+- **Persistent Action Scheduler (P2):**
+  - Zero-dependency `asyncio` + SQLite (`scheduled_actions`) deferred execution engine (`ActionScheduler`) with crash recovery, `safe_direction` misfire policy, runtime guard enforcement, and Actor-Critic post-action verification (`assert_state` + automatic retry).
 - **Pre-Condition Guard Clauses, Parallel Telemetry & Multi-Interrupt Two-Phase Commit:**
   - Blocks out-of-range HVAC setpoints, respects window-open frost protection (`window_open_guard_temp` + contact sensors), and prevents stopping/restarting protected containers or VMs (`ProtectedResourceViolationError`).
   - Parallelizes Docker container telemetry stats via `ThreadPoolExecutor` and `infra.docker_stats_concurrency`.
@@ -30,24 +36,34 @@ Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homela
 
 ```text
 homelab-agent-mesh/
+├── .dockerignore
 ├── .env.example
 ├── .gitignore
 ├── pyproject.toml
 ├── docker-compose.yml
 ├── Dockerfile
 ├── README.md
+├── docs/
+│   ├── architecture.md
+│   ├── architecture_roadmap.md
+│   └── deployment.md                # Dual-repo GitOps, GHCR & SOPS+age deployment guide
 ├── config/
 │   └── settings.example.yaml
+├── tests/
+│   └── test_orchestrator.py
 └── src/
     ├── __init__.py
     ├── main.py                      # FastAPI SSE entrypoint & lifecycle manager
     ├── core/
     │   ├── __init__.py
     │   ├── config.py                # Pydantic BaseSettings (.env + YAML loader)
+    │   ├── entity_resolver.py       # Event-driven HA Grounding Index & CoALA entity_memory
     │   ├── events.py                # Typed SSE event models & async queue sink
     │   ├── exceptions.py            # Custom domain & circuit-breaker exceptions
     │   ├── guards.py                # Pre-condition Guard Clauses & safety validators
-    │   └── interfaces.py            # Abstract interfaces (BaseStateVerifier, EventEmitter)
+    │   ├── interfaces.py            # Abstract interfaces (BaseStateVerifier, EventEmitter)
+    │   ├── scheduler.py             # Persistent asyncio + SQLite ActionScheduler
+    │   └── text_tr.py               # Turkish normalization, stemming & domain hints
     ├── memory/
     │   ├── __init__.py
     │   ├── base.py                  # Abstract Memory Store interface (DIP)
@@ -55,7 +71,8 @@ homelab-agent-mesh/
     ├── tools/
     │   ├── __init__.py
     │   ├── ha_ws_adapter.py         # Custom Async WebSocket adapter & state asserter
-    │   └── infra_mcp_server.py      # FastMCP / MCPServer for Host, Docker & Proxmox
+    │   ├── infra_mcp_server.py      # FastMCP / MCPServer for Host, Docker & Proxmox
+    │   └── schedule_tools.py        # Strands tools for deferred HA scheduling
     ├── agents/
     │   ├── __init__.py
     │   ├── factory.py               # Dynamic Strands Agent builder & InterventionHandlers
@@ -65,7 +82,7 @@ homelab-agent-mesh/
     └── api/
         ├── __init__.py
         ├── schemas.py               # SSE event & request/response Pydantic models
-        └── routes.py                # Streaming /chat/stream & /interventions/approve endpoints
+        └── routes.py                # /chat/stream, /entities/*, /schedules & /health endpoints
 ```
 
 ## Quick Start

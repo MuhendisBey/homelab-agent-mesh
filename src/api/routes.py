@@ -13,20 +13,30 @@ from src import __version__
 from src.agents.supervisor import SessionOrchestrator, SupervisorRuntime
 from src.api.schemas import (
     ChatStreamRequest,
+    EntityMemoryCreateRequest,
+    EntityMemoryResponse,
+    EntityRefreshResponse,
+    EntityResolveResponse,
     ErrorEvent,
     HealthResponse,
     InterventionDecisionRequest,
     LessonCreateRequest,
     LessonResponse,
     PendingApprovalSummary,
+    ScheduleCreateRequest,
+    ScheduleResponse,
 )
 from src.core.config import AppConfig
+from src.core.entity_resolver import EntityResolver
 from src.core.exceptions import (
+    GuardViolationError,
     HomelabAgentError,
     InterventionNotFoundError,
     PendingInterventionError,
+    ResourceNotFoundError,
     SessionBusyError,
 )
+from src.core.scheduler import ActionScheduler, ScheduleStatus
 from src.memory.base import BaseMemoryStore
 
 router = APIRouter(prefix="/api/v1", tags=["orchestrator"])
@@ -45,6 +55,16 @@ def get_supervisor_runtime(request: Request) -> SupervisorRuntime:
 def get_memory_store(request: Request) -> BaseMemoryStore:
     store: BaseMemoryStore = request.app.state.memory_store
     return store
+
+
+def get_entity_resolver(request: Request) -> EntityResolver:
+    resolver: EntityResolver = request.app.state.entity_resolver
+    return resolver
+
+
+def get_scheduler(request: Request) -> ActionScheduler:
+    scheduler: ActionScheduler = request.app.state.scheduler
+    return scheduler
 
 
 async def verify_bearer_token(
@@ -250,4 +270,158 @@ async def query_lessons(
 ) -> list[str]:
     """Retrieve matching Core Invariants and semantic rules for a domain and query."""
     return await store.get_relevant_rules(domain=domain, query=query)
+
+
+# ---------------------------------------------------------------------------
+# P1: EntityResolver & CoALA Entity Memory routes
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/entities/resolve",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=EntityResolveResponse,
+)
+async def resolve_entities(
+    q: str = Query(min_length=1, max_length=500),
+    domain: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=5, ge=1, le=20),
+    resolver: EntityResolver = Depends(get_entity_resolver),
+) -> EntityResolveResponse:
+    """Resolve a natural-language Turkish/English entity reference in <10ms."""
+    return await resolver.resolve(query=q, domain_hint=domain, limit=limit)
+
+
+@router.post(
+    "/entities/refresh",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=EntityRefreshResponse,
+)
+async def refresh_entity_registry(
+    resolver: EntityResolver = Depends(get_entity_resolver),
+) -> EntityRefreshResponse:
+    """Force an immediate synchronization of the HA Grounding Index & entity_memory."""
+    count = await resolver.refresh()
+    return EntityRefreshResponse(
+        status="ok",
+        entity_count=count,
+        last_sync_utc=resolver.last_sync_utc,
+    )
+
+
+@router.get(
+    "/entities/memory",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=list[EntityMemoryResponse],
+)
+async def list_entity_memory(
+    status_filter: str | None = Query(default=None, alias="status", max_length=32),
+    resolver: EntityResolver = Depends(get_entity_resolver),
+) -> list[EntityMemoryResponse]:
+    """List learned phrase -> entity_id mappings from CoALA semantic memory."""
+    return await resolver.list_memory(status=status_filter)
+
+
+@router.post(
+    "/entities/memory",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=EntityMemoryResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upsert_entity_memory(
+    body: EntityMemoryCreateRequest,
+    resolver: EntityResolver = Depends(get_entity_resolver),
+) -> EntityMemoryResponse:
+    """Teach or correct a phrase -> entity_id mapping in CoALA entity_memory."""
+    if body.is_correction or body.wrong_entity_id:
+        saved = await resolver.record_user_correction(
+            phrase=body.phrase,
+            correct_entity_id=body.entity_id,
+            wrong_entity_id=body.wrong_entity_id,
+        )
+    else:
+        saved = await resolver.record_verified_resolution(
+            phrase=body.phrase,
+            entity_id=body.entity_id,
+            source=body.source,
+        )
+    if saved is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "error": "invalid_entity_mapping",
+                "message": f"Could not persist mapping '{body.phrase}' -> '{body.entity_id}'.",
+            },
+        )
+    return saved
+
+
+# ---------------------------------------------------------------------------
+# P2: Persistent Action Scheduler routes
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/schedules",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=ScheduleResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_schedule(
+    body: ScheduleCreateRequest,
+    scheduler: ActionScheduler = Depends(get_scheduler),
+) -> ScheduleResponse:
+    """Create a persistent deferred Home Assistant action."""
+    try:
+        return await scheduler.schedule_action(
+            domain=body.domain,
+            service=body.service,
+            entity_id=body.entity_id,
+            delay_seconds=body.delay_seconds,
+            run_at_utc=body.run_at_utc,
+            service_data=body.service_data,
+            expected_state=body.expected_state,
+            expected_attributes=body.expected_attributes,
+            description=body.description,
+            misfire_policy=body.misfire_policy,
+            misfire_grace_sec=body.misfire_grace_sec,
+            created_by="api",
+        )
+    except GuardViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=exc.to_dict(),
+        ) from exc
+
+
+@router.get(
+    "/schedules",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=list[ScheduleResponse],
+)
+async def list_schedules(
+    status_filter: ScheduleStatus | None = Query(default=None, alias="status"),
+    entity_id: str | None = Query(default=None, max_length=256),
+    scheduler: ActionScheduler = Depends(get_scheduler),
+) -> list[ScheduleResponse]:
+    """List scheduled Home Assistant actions filtered by optional status or entity_id."""
+    return await scheduler.list_actions(status=status_filter, entity_id=entity_id)
+
+
+@router.delete(
+    "/schedules/{schedule_id}",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=ScheduleResponse,
+)
+async def cancel_schedule(
+    schedule_id: str,
+    scheduler: ActionScheduler = Depends(get_scheduler),
+) -> ScheduleResponse:
+    """Cancel a pending scheduled Home Assistant action."""
+    try:
+        return await scheduler.cancel_action(schedule_id)
+    except ResourceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.to_dict()) from exc
+    except GuardViolationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.to_dict()) from exc
 

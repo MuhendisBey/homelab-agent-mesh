@@ -14,7 +14,10 @@ import ssl
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.core.entity_resolver import EntityResolver
 
 import httpx
 import websockets
@@ -48,6 +51,7 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
         config: AppConfig,
         circuit_breaker: CircuitBreaker | None = None,
         http_client: httpx.AsyncClient | None = None,
+        entity_resolver: EntityResolver | None = None,
     ) -> None:
         self._config = config
         self._ha_cfg = config.home_assistant
@@ -61,11 +65,26 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
         self._http_client = http_client
         self._owns_http_client = http_client is None
         self._aliases = {k.strip().lower(): v.strip() for k, v in self._ha_cfg.entity_aliases.items()}
+        self._entity_resolver = entity_resolver
+
+    @property
+    def entity_resolver(self) -> EntityResolver | None:
+        return self._entity_resolver
+
+    def attach_entity_resolver(self, resolver: EntityResolver | None) -> None:
+        """Attach (or replace) the live :class:`EntityResolver` instance."""
+        self._entity_resolver = resolver
 
     def resolve_entity_id(self, entity_or_alias: str) -> str:
-        """Resolve configured friendly aliases (e.g. 'living_room_tv') to canonical entity_ids."""
+        """Resolve configured or cached friendly aliases into canonical entity_ids."""
         cleaned = entity_or_alias.strip()
-        return self._aliases.get(cleaned.lower(), cleaned)
+        if cleaned.lower() in self._aliases:
+            return self._aliases[cleaned.lower()]
+        if self._entity_resolver is not None:
+            cached = self._entity_resolver.resolve_cached_alias(cleaned)
+            if cached:
+                return cached
+        return cleaned
 
     async def aclose(self) -> None:
         """Close owned HTTP client if initialized."""
@@ -151,6 +170,37 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
                     )
                 return data
 
+    @asynccontextmanager
+    async def ws_session(self) -> AsyncIterator[ClientConnection]:
+        """Public authenticated Home Assistant WebSocket session."""
+        async with self._ws_session() as ws:
+            yield ws
+
+    async def send_ws_command(
+        self,
+        ws: ClientConnection,
+        msg_id: int,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Send a WebSocket command on an open session and await its result."""
+        return await self._send_ws_command(ws, msg_id, payload)
+
+    async def get_all_states(self) -> list[dict[str, Any]]:
+        """Fetch all Home Assistant entity states via REST ``/api/states``."""
+        async with self._breaker.guard():
+            client = self._get_http_client()
+            try:
+                response = await client.get("/api/states")
+            except httpx.HTTPError as exc:
+                raise HomeAssistantError(f"Failed to query /api/states: {exc}") from exc
+            if response.status_code >= 400:
+                raise HomeAssistantError(
+                    f"HA REST /api/states returned HTTP {response.status_code}",
+                    status_code=response.status_code,
+                )
+            data = response.json()
+            return list(data) if isinstance(data, list) else []
+
     # ------------------------------------------------------------------
     # State reading (REST + WS fallback)
     # ------------------------------------------------------------------
@@ -165,6 +215,8 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
             except httpx.HTTPError as exc:
                 raise HomeAssistantError(f"Failed to query state for '{canonical}': {exc}") from exc
             if response.status_code == 404:
+                if self._entity_resolver is not None:
+                    self._entity_resolver.on_entity_not_found(canonical)
                 return None
             if response.status_code >= 400:
                 raise HomeAssistantError(
@@ -354,6 +406,13 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
         except (TypeError, ValueError):
             return str(actual).strip().lower() == str(expected).strip().lower()
 
+    async def _record_verified_learning(self, entity_id: str) -> None:
+        if self._entity_resolver is None:
+            return
+        phrase = self._entity_resolver.pop_pending_phrase(entity_id)
+        if phrase:
+            await self._entity_resolver.record_verified_resolution(phrase, entity_id)
+
     async def assert_state(
         self,
         entity_id: str,
@@ -384,6 +443,7 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
         last_snapshot = initial
         matched, last_reason = self._matches(initial, expected_state, exp_attrs)
         if matched:
+            await self._record_verified_learning(canonical)
             return StateAssertionSuccess(
                 entity_id=canonical,
                 expected_state=expected_state,
@@ -405,6 +465,7 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
             last_snapshot = current
             matched, last_reason = self._matches(current, expected_state, exp_attrs)
             if matched:
+                await self._record_verified_learning(canonical)
                 return StateAssertionSuccess(
                     entity_id=canonical,
                     expected_state=expected_state,
@@ -565,10 +626,69 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
             )
             return result.model_dump(mode="json")
 
-        return [
+        tools: list[AgentTool] = [
             get_ha_entity_state,
             call_ha_service,
             execute_sequential_loop,
             fire_custom_ha_event,
             assert_entity_state,
         ]
+
+        if self._entity_resolver is not None:
+            resolver = self._entity_resolver
+
+            @tool(
+                name="resolve_entity",
+                description=(
+                    "Resolve a natural-language Turkish/English room/device phrase "
+                    "(e.g. 'mutfak ışığı', 'yatak odası kliması') into canonical Home Assistant "
+                    "entity_id(s) in <10ms using cached entity memory and live registry grounding. "
+                    "Call this FIRST before ha_mcp_ha_search."
+                ),
+            )
+            async def resolve_entity(
+                query: str,
+                domain_hint: str | None = None,
+                limit: int = 5,
+            ) -> dict[str, Any]:
+                """Resolve a natural-language phrase into Home Assistant entity candidates.
+
+                Args:
+                    query: Room/device description (e.g. 'mutfak ışığı').
+                    domain_hint: Optional HA domain filter (e.g. 'light', 'switch', 'climate').
+                    limit: Maximum candidates to return (default 5).
+                """
+                res = await resolver.resolve(query=query, domain_hint=domain_hint, limit=limit)
+                return res.model_dump(mode="json")
+
+            @tool(
+                name="remember_entity_alias",
+                description=(
+                    "Persist a user correction or explicit alias mapping (phrase -> entity_id) "
+                    "in CoALA entity memory."
+                ),
+            )
+            async def remember_entity_alias(
+                phrase: str,
+                entity_id: str,
+                wrong_entity_id: str | None = None,
+            ) -> dict[str, Any]:
+                """Teach or correct an entity alias in entity_memory.
+
+                Args:
+                    phrase: User's natural-language reference.
+                    entity_id: Correct canonical Home Assistant entity_id.
+                    wrong_entity_id: Optional wrong entity_id to reject as negative evidence.
+                """
+                saved = await resolver.record_user_correction(
+                    phrase=phrase,
+                    correct_entity_id=entity_id,
+                    wrong_entity_id=wrong_entity_id,
+                )
+                if saved is None:
+                    return {"saved": False, "reason": "Unknown entity_id or invalid phrase."}
+                return {"saved": True, **saved.model_dump(mode="json")}
+
+            tools.extend([resolve_entity, remember_entity_alias])
+
+        return tools

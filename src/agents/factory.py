@@ -38,6 +38,7 @@ from strands.tools.executors import ConcurrentToolExecutor, SequentialToolExecut
 from strands.types.tools import AgentTool
 
 from src.core.config import AppConfig, SubAgentSettings
+from src.core.entity_resolver import EntityResolver
 from src.core.events import (
     CriticVerdictEvent,
     MemoryInjectedEvent,
@@ -48,6 +49,7 @@ from src.core.events import (
 from src.core.exceptions import HomelabAgentError
 from src.core.guards import GuardRails, HvacSetpointGuard, extract_service_call, operation_registry
 from src.core.interfaces import BaseStateVerifier, EventEmitter
+from src.core.scheduler import ActionScheduler
 from src.memory.base import BaseMemoryStore
 from src.tools.ha_ws_adapter import HomeAssistantWSAdapter
 from src.tools.infra_mcp_server import HomelabInfraToolkit
@@ -70,6 +72,8 @@ class SubAgentBuildContext:
     infra_toolkit: HomelabInfraToolkit
     emitter: EventEmitter
     model_factory: Callable[[str | None, float | None], Model]
+    entity_resolver: EntityResolver | None = None
+    scheduler: ActionScheduler | None = None
 
 
 SubAgentBuilder = Callable[[SubAgentSettings, SubAgentBuildContext], AgentTool]
@@ -391,11 +395,15 @@ class AgentFactory:
         infra_toolkit: HomelabInfraToolkit,
         genai_client: genai.Client | None = None,
         custom_model_factory: Callable[[str | None, float | None], Model] | None = None,
+        entity_resolver: EntityResolver | None = None,
+        scheduler: ActionScheduler | None = None,
     ) -> None:
         self._config = config
         self._memory_store = memory_store
         self._ha_adapter = ha_adapter
         self._infra_toolkit = infra_toolkit
+        self._entity_resolver = entity_resolver
+        self._scheduler = scheduler
         self._genai_client = genai_client or genai.Client(
             api_key=config.gemini_api_key.get_secret_value()
         )
@@ -445,6 +453,8 @@ class AgentFactory:
             infra_toolkit=self._infra_toolkit,
             emitter=emitter,
             model_factory=self.build_model,
+            entity_resolver=self._entity_resolver,
+            scheduler=self._scheduler,
         )
         tools: list[AgentTool] = []
         for key, sub_cfg in self._config.agents.sub_agents.items():

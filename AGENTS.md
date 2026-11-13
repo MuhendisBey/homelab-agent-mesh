@@ -1,5 +1,5 @@
 # Homelab & Smart Home Multi-Agent Mesh (AGENTS.md)
-*Sürüm: v1.1.0 | Son Güncelleme: 2026-11-13 (Production Hardening)*
+*Sürüm: v1.2.0 | Son Güncelleme: 2026-11-13 (P1 EntityResolver & P2 ActionScheduler)*
 
 Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başlamamak; mimariyi, tasarım kararlarını, dosya yapısını, güvenlik kurallarını ve anlık durumu eksiksiz hatırlamak için hazırlanmış operasyonel rehberdir.
 
@@ -30,6 +30,8 @@ Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başl
 │                         FASTAPI STREAMING GATEWAY                              │
 │       • POST /api/v1/chat/stream          • POST /api/v1/interventions/approve │
 │       • GET  /api/v1/health               • POST/GET /api/v1/memory/lessons    │
+│       • GET/POST /api/v1/entities/{resolve,refresh,memory}                     │
+│       • GET/POST/DELETE /api/v1/schedules                                      │
 └────────────────────────────────────┬───────────────────────────────────────────┘
                                      │
                                      ▼
@@ -45,24 +47,26 @@ Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başl
 │        HOME ASSISTANT SUB-AGENT       │  │        INFRASTRUCTURE SUB-AGENT     │
 │  • Durumsuz (Stateless, context=False)│  │  • Durumsuz (Stateless)             │
 │  • Dinamik 'ha' dersleri enjeksiyonu  │  │  • Dinamik 'infra' ders enjeksiyonu │
+│  • resolve_entity / schedule_ha_action│  │                                     │
 └─────────┬───────────────────┬─────────┘  └──────────────────┬──────────────────┘
           │                   │                               │
           ▼                   ▼                               ▼
 ┌──────────────────┐ ┌────────────────────────┐ ┌────────────────────────────────┐
 │   ha-mcp Client  │ │  ha-custom-ws Adapter  │ │   homelab-infra-mcp Toolkit    │
 │  (Harici SSE MCP)│ │ (Native Async WS)      │ │  • psutil Telemetri (CPU/RAM)  │
-│  • Varlık arama  │ │ • Hızlı döngü (loops)  │ │  • Docker SDK Socket Kontrolü  │
-│  • Standart servis│ │ • raw event.fire       │ │  • Proxmox VE API (LXC/VM)    │
-│                  │ │ • assert_entity_state  │ │  • Korumalı Konteyner Kalkanı  │
+│  • Varlık arama  │ │ • EntityResolver (<15ms)│ │  • Docker SDK Socket Kontrolü  │
+│  • Standart servis│ │ • ActionScheduler      │ │  • Proxmox VE API (LXC/VM)    │
+│                  │ │ • raw event.fire       │ │  • Korumalı Konteyner Kalkanı  │
+│                  │ │ • assert_entity_state  │ │                                │
 └──────────────────┘ └────────────────────────┘ └────────────────────────────────┘
           │                   │                               │
           └───────────────────┴───────────────┬───────────────┘
                                               ▼
 ┌────────────────────────────────────────────────────────────────────────────────┐
-│               3 KATMANLI ZERO-MISS REFLECTION MEMORY (SQLite)                  │
-│  • Tier 1: Domain İzolasyonu ('ha' vs 'infra' asla birbirine sızmaz)           │
-│  • Tier 2: Çekirdek Kurallar (is_core_invariant=1 -> %0 kaçırma, daima promptta)│
-│  • Tier 3: Semantik Benzerlik (Gemini Embeddings + Local Hashed N-gram fallback)│
+│        SQLITE KALICI BELLEK & OLAY TABANLI DURUM KATMANI (WAL / asyncio)       │
+│  • ReflectionStore (3 Katman): Domain izolasyonu, is_core_invariant, Semantik  │
+│  • EntityResolver + CoALA entity_memory: HA WS registry event sync + Türkçe kök│
+│  • ActionScheduler (scheduled_actions): Yeniden başlatmaya dayanıklı zamanlayıcı│
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -92,64 +96,96 @@ Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başl
 - Çoklu konteyner telemetri sorguları (`_list_containers_sync`) `ThreadPoolExecutor` ve `infra.docker_stats_concurrency` ile paralel toplanır.
 - SQLite başlatma ve semantik skorlama `asyncio.to_thread` üzerinden izole edilerek FastAPI SSE event loop'u sıfır bloklama ile çalışır.
 
+### F. P1 — Olay Tabanlı `EntityResolver`, Türkçe Morfoloji & CoALA `entity_memory`
+- **Sıfır Harici Bağımlılıklı Türkçe Kök Bulucu (`src/core/text_tr.py`):** `İ/ı` uyumlu normalizasyon, diyaktitik katlama, sondan eklemeli çekim eki budama ve ünsüz yumuşaması geri çevirme (`mutfağındaki ışıkları` → `mutfak`, `isik`), ünlüyle biten kök koruması (`klima`, `lamba`, `perde`).
+- **4 Katmanlı Tazelik (`src/core/entity_resolver.py`):** Başlangıçta SQLite `entity_registry_snapshot` önbelleğinden anında yüklenir; arka planda Home Assistant WebSocket `entity_registry_updated`, `device_registry_updated`, `area_registry_updated`, `floor_registry_updated` olaylarını dinler; kopmada exponansiyel backoff ile yeniden senkronize olur; 6 saatte bir tam uzlaştırma ve HTTP 404 self-healing uygular.
+- **Çok Aşamalı Çözümleme Hattı (`EntityResolver.resolve`):**
+  1. **Stage 0:** Doğrudan kanonik `entity_id` ve `settings.yaml` içindeki statik `entity_aliases` (`0.99`).
+  2. **Stage 1 & 2:** CoALA `entity_memory` SQLite tablosundan Beta-Bernoulli güven skorlu tam (`0.96+`) ve bulanık eşleşme (`entity_memory_exact`, `entity_memory_fuzzy`).
+  3. **Stage 3:** Yerel deterministik HA Grounding Index skorlaması (`light<->switch` uyumu, oda/alan bonusu, domain önceliği; `update.*` gürültüsü hariç).
+  4. **Stage 4:** Yalnızca Stage 0–3 belirsiz veya `<0.85` kaldığında ağ tabanlı semantik embedding (`entity_memory_semantic`) yedeği.
+- **Doğrulanmış Öğrenme & Çift Yönlü Senkronizasyon:** `entity_memory` yalnızca `assert_entity_state` ile fiziksel olarak doğrulanan aksiyonlardan (`verified_action`) veya `remember_entity_alias` / `POST /api/v1/entities/memory` kullanıcı düzeltmelerinden öğrenir. HA'da entity yeniden adlandırılırsa (`entity_registry_updated`) ilişkili bellek kayıtları taşınır; silinirse `stale` işaretlenir.
+
+### G. P2 — Kalıcı `ActionScheduler` (`src/core/scheduler.py` & `src/tools/schedule_tools.py`)
+- Harici cron/APScheduler bağımlılığı olmadan saf `asyncio` + SQLite (`scheduled_actions`, WAL modu, `_exec_lock` muteksi) ile ertelenmiş eylemleri yürütür (`schedule_ha_action`, `list_scheduled_actions`, `cancel_scheduled_action` araçları ve `/api/v1/schedules` API'ı).
+- **Kaza Kurtarma & Güvenli Yön Misfire Politikası (`safe_direction`):** Konteyner yeniden başlatıldığında `running` kalmış kayıtları kurtarır; `misfire_grace_sec` (varsayılan 300s) geçmiş işlerde yalnızca güvenli kapatma komutlarını (`turn_off`, `close_cover`, `lock`, `hvac_mode=off`) çalıştırır, açma/ısıtma komutlarını atlar.
+- **Çalışma Anı Koruma & Actor-Critic Doğrulama:** Tetikleme anında HVAC/korumalı kaynak guard'larını yeniden denetler, servisi çağırır, `assert_state` ile fiziksel durumu doğrular ve başarısız olursa otomatik 1 kez yeniden dener (`attempts / max_attempts`). SSE akışına `schedule_created`, `schedule_fired`, `schedule_result` olaylarını yayar.
+
 ---
 
 ## 4. Dizin Yapısı ve Dosya Haritası
 
 ```text
 homelab-agent-mesh/
+├── .dockerignore                    # Gizli .env, settings.yaml ve *.db dışlayıcı (CI/build kalkanı)
 ├── .env.example                     # Gizli veri içermeyen ortam değişkeni şablonu
 ├── .gitignore                       # .env, data/*.db, settings.yaml dışlayıcı
-├── pyproject.toml                   # Hatchling build & bağımlılıklar (strands-agents, mcp, fastapi)
-├── Dockerfile                       # Multi-stage <80 MB RSS hedefli Docker imajı
-├── docker-compose.yml               # Yerel montajlar (/var/run/docker.sock, data, config)
-├── README.md                        # Mimari dökümantasyonu ve cURL örnekleri
+├── pyproject.toml                   # Hatchling build & bağımlılıklar (v1.2.0)
+├── Dockerfile                       # Multi-stage <128 MB RSS hedefli Docker imajı
+├── docker-compose.yml               # Yerel geliştirme montajları (/var/run/docker.sock, data, config)
+├── README.md                        # Mimari dokümantasyonu ve cURL örnekleri
+├── docs/
+│   ├── architecture.md              # Detaylı C4 & sekans diyagramları
+│   ├── architecture_roadmap.md      # v2.0 Plugin SDK, Tracing & MQTT yol haritası
+│   └── deployment.md                # P3: Çift repolu GitOps, GHCR & SOPS+age dağıtım stratejisi
 ├── config/
 │   └── settings.example.yaml        # Domain, güvenlik sınırları ve ajan şablonu
 ├── tests/
 │   └── test_orchestrator.py         # Mypy strict & pytest uçtan uca doğrulama testleri
 └── src/
-    ├── __init__.py                  # Paket versiyonu (1.0.0)
+    ├── __init__.py                  # Paket versiyonu (1.2.0)
     ├── main.py                      # FastAPI başlatıcı, lifecycle yöneticisi ve CLI
     ├── core/
     │   ├── config.py                # pydantic-settings tabanlı YAML + .env yükleyici
+    │   ├── entity_resolver.py       # P1: Olay tabanlı HA Grounding Index & CoALA entity_memory
     │   ├── events.py                # Typed SSE olay modelleri ve asenkron QueueEventSink
     │   ├── exceptions.py            # Hiyerarşik domain hataları (CircuitOpen, GuardViolation)
     │   ├── guards.py                # Devre kesici (CircuitBreaker), HVAC ve Docker kalkanları
-    │   └── interfaces.py            # BaseStateVerifier ve EventEmitter protokolleri (DIP)
+    │   ├── interfaces.py            # BaseStateVerifier ve EventEmitter protokolleri (DIP)
+    │   ├── scheduler.py             # P2: SQLite + asyncio kalıcı ActionScheduler
+    │   └── text_tr.py               # Türkçe metin normalizasyonu, kök bulucu ve domain ipucu çıkarıcı
     ├── memory/
     │   ├── base.py                  # BaseMemoryStore ve BaseEmbedder soyut arayüzleri
     │   └── reflection_store.py      # SQLite + Gemini / Local N-gram 3 katmanlı hafıza
     ├── tools/
-    │   ├── ha_ws_adapter.py         # Home Assistant native async WebSocket & REST adaptörü
-    │   └── infra_mcp_server.py      # FastMCP uyumlu psutil, Docker ve Proxmox araç kiti
+    │   ├── ha_ws_adapter.py         # HA WebSocket/REST adaptörü, resolve_entity & assert_entity_state
+    │   ├── infra_mcp_server.py      # FastMCP uyumlu psutil, Docker ve Proxmox araç kiti
+    │   └── schedule_tools.py        # P2: schedule_ha_action / list / cancel Strands araçları
     ├── agents/
     │   ├── factory.py               # Sub-agent plugin kayıt sistemi, InterventionHandler & hooks
     │   ├── ha_agent.py              # Home Assistant uzman alt-ajanı (stateless)
     │   ├── infra_agent.py           # Homelab altyapı uzman alt-ajanı (stateless)
     │   └── supervisor.py            # Root Supervisor Orkestratör (HITL & sliding memory)
     └── api/
-        ├── schemas.py               # Pydantic HTTP şemaları
-        └── routes.py                # /chat/stream, /interventions/approve ve /health rotaları
+        ├── schemas.py               # Pydantic HTTP şemaları (chat, entities, schedules)
+        └── routes.py                # /chat/stream, /interventions/*, /entities/*, /schedules, /health
 ```
 
 ---
 
 ## 5. Projenin Güncel Durumu (2026-11-13 İtibarıyla)
 
-- [x] Tüm modüller tamamen yazıldı, modüler ve `strict` tip uyumlu.
-- [x] `mypy --strict src tests` kontrolünden 23/23 dosya başarıyla geçti (0 hata).
-- [x] `pytest tests/test_orchestrator.py` ile 3 katmanlı hafıza, güvenlik kalkanları, bellek zehirlenmesi kalkanı, paralel telemetri ve çoklu onay (multi-interrupt) akışları doğrulandı (6/6 test passed).
-- [x] 3 temel üretim ortamı sertleştirmesi (production hardening) tamamlandı:
-  1. Memory Drift / Anti-Poisoning guard & occurrence threshold (2x)
-  2. Async non-blocking I/O & parallel container stats (concurrency=4)
-  3. Multi-interrupt sequential & batch state resumption
-- [x] Git deposuna temiz ve mantıksal commit'ler olarak işlendi (asla gizli anahtar sızdırılmadı).
-- [x] Kullanıcı yerel diski üzerinde `.env` ve `config/settings.yaml` dosyalarını oluşturdu.
+- [x] P1 (`EntityResolver` + Türkçe Kök Bulucu + CoALA `entity_memory`) ve P2 (`ActionScheduler`) modülleri yazıldı, Strands ajanlarına ve FastAPI uç noktalarına entegre edildi.
+- [x] `mypy --strict src tests` kontrolünden **27/27 dosya** 0 hata ile geçti; `ruff check` temiz.
+- [x] `pytest -v` ile hafıza, güvenlik kalkanları, bellek zehirlenmesi kalkanı, paralel telemetri, multi-interrupt, Türkçe varlık çözümleme (`EntityResolver`) ve zamanlayıcı (`ActionScheduler`) testleri doğrulandı (**8/8 passed**).
+- [x] Canlı Home Assistant (808 entity) üzerinde konteyner içi uçtan uca doğrulama tamamlandı:
+  - `/api/v1/entities/resolve` ile `mutfak isigi` (`9.79 ms`, `entity_memory_exact`), `oturma odasi isik` (`16.72 ms`), `yatak odasindaki klimayi` (`15.09 ms`) sorguları harici embedding çağrısı olmadan tek hamlede çözümlendi.
+  - `/api/v1/chat/stream` üzerinden `"Mutfaktaki isiklari ac, 15 saniye sonra geri kapat"` senaryosunda anında açma + `assert_entity_state` + CoALA `entity_memory` öğrenmesi + 15s sonra kalıcı zamanlayıcı ile kapatıp doğrulama (`status: "done"`, `verified: true`) uçtan uca teyit edildi.
+- [x] P3 GitOps temeli hazırlandı: `.dockerignore`, `.github/workflows/ci.yml` (`linux/amd64` → private GHCR), `docs/deployment.md` ve özel `MuhendisBey/homelab-ops` (`SOPS + age + justfile`) dağıtım reposu yapılandırıldı.
+- [x] Sonraki aşamalar (kullanıcı onayında): LXC 900 ilk kurulum + geçiş testi, ardından P4–P5 (`/api/v1/voice`, AirPlay `Announcer`, özel HA `kezban` conversation entegrasyonu).
 
 ---
 
-## 6. Yeni Session Açıldığında Nereden Başlanmalı? (Operasyonel Rehber)
+## 6. Deployment & Çok Repolu GitOps Rehberi (`homelab-ops`)
+
+- **Public vs. Private Ayrımı:**
+  - Bu depo (`MuhendisBey/homelab-agent-mesh`, **public**) yalnızca uygulama kodu, testler ve container build CI/CD iş akışını (`.github/workflows/ci.yml`) içerir; konteyner imajı **private GHCR (`ghcr.io/muhendisbey/homelab-agent-mesh`)** paketine `linux/amd64` olarak basılır.
+  - Üretim yapılandırması, gerçek `settings.yaml`, SOPS + `age` ile şifreli `.env` sırları (`secrets.env.sops`), `compose.yaml` ve `justfile` tarifleri özel **`MuhendisBey/homelab-ops` (private)** reposunda yaşar (yerelde çalışma alanı kökündeki gitignored `./homelab-ops/` dizini).
+  - Ayrıntılı strateji, sekans diyagramları, firewall (`DOCKER-USER`) ve LXC kurulum adımları için 👉 **[docs/deployment.md](docs/deployment.md)** dosyasına başvurun.
+
+---
+
+## 7. Yeni Session Açıldığında Nereden Başlanmalı? (Operasyonel Rehber)
 
 Yeni oturumda doğrudan **canlı test ve entegrasyon aşamasına** geçilir. Sırasıyla izlenecek adımlar:
 

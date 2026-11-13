@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +17,7 @@ from strands.models.model import Model
 
 from src.agents.factory import AgentFactory
 from src.core.config import AppConfig
+from src.core.entity_resolver import EntityResolver, RegistryEntityRecord
 from src.core.exceptions import (
     MemoryPoisoningError,
     ProtectedResourceViolationError,
@@ -28,6 +32,8 @@ from src.core.interfaces import (
     StateAssertionResult,
     StateAssertionSuccess,
 )
+from src.core.scheduler import ActionScheduler
+from src.core.text_tr import infer_domain_hints, normalize_tr, stem_tr_phrase
 from src.main import create_app
 from src.memory.reflection_store import (
     LocalHashedNgramEmbedder,
@@ -652,4 +658,371 @@ def test_multi_interrupt_sequential_and_batch_resumption(
         assert bdone3["stop_reason"] == "end_turn"
         assert bdone3["pending_approvals"] == []
         assert set(batch_actions) == {"ha_get_state", "docker_restart:immich"}
+
+
+def _make_registry_record(
+    entity_id: str,
+    friendly_name: str,
+    area_id: str | None,
+    area_name: str | None,
+    state: str = "off",
+    aliases: tuple[str, ...] = (),
+) -> RegistryEntityRecord:
+    domain = entity_id.split(".", 1)[0]
+    obj_part = entity_id.split(".", 1)[-1].replace("_", " ")
+    combined = normalize_tr(f"{friendly_name} {area_name or ''} {obj_part} {' '.join(aliases)}")
+    _, search_stems = stem_tr_phrase(combined, strip_stopwords=False)
+    _, area_stems = stem_tr_phrase(area_name or "", strip_stopwords=False)
+    return RegistryEntityRecord(
+        entity_id=entity_id,
+        domain=domain,
+        friendly_name=friendly_name,
+        area_id=area_id,
+        area_name=area_name,
+        aliases=aliases,
+        state=state,
+        search_text_norm=combined,
+        search_stems=search_stems,
+        area_stems=area_stems,
+    )
+
+
+@pytest.mark.asyncio
+async def test_turkish_stemmer_and_entity_resolver_grounding_and_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1. Turkish morphology, I/ı casefolding, softening reversal, and domain hints
+    assert normalize_tr("Mutfaktaki IŞIKLARI aç") == "mutfaktaki isiklari ac"
+    _, mutfak_stems = stem_tr_phrase("Mutfaktaki IŞIKLARI aç")
+    assert set(mutfak_stems) == {"mutfak", "isik"}
+    assert infer_domain_hints("Mutfaktaki ışıkları aç") == ("light", "switch")
+
+    _, klima_stems = stem_tr_phrase("Oturma odasındaki klimayı çalıştır")
+    assert set(klima_stems) == {"oturma", "oda", "klima"}
+    assert infer_domain_hints("Oturma odasındaki klimayı") == ("climate",)
+
+    # 2. Grounding Index resolution & ambiguity handling
+    cfg = _load_test_config(tmp_path, monkeypatch)
+    records = [
+        _make_registry_record("switch.mutfak_isik", "Mutfak Işık", "mutfak", "Mutfak"),
+        _make_registry_record(
+            "sensor.mutfak_isik_guc", "Mutfak Işık Güç", "mutfak", "Mutfak", state="0"
+        ),
+        _make_registry_record(
+            "climate.yatak_odasi", "Yatak Odası Klima", "yatak_odasi", "Yatak Odası", state="off"
+        ),
+        _make_registry_record("light.salon_tavan", "Salon Tavan Işık", "salon", "Salon"),
+        _make_registry_record("light.salon_abajur", "Salon Abajur Işık", "salon", "Salon"),
+    ]
+
+    def ha_http_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/states/switch.mutfak_isik":
+            return httpx.Response(
+                200,
+                json={"entity_id": "switch.mutfak_isik", "state": "on", "attributes": {}},
+            )
+        return httpx.Response(404, json={"message": "Entity not found"})
+
+    resolver = EntityResolver(
+        config=cfg,
+        db_path=cfg.sqlite_db_path,
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        enable_ws_listener=False,
+    )
+    resolver.seed_records_for_test(records)
+
+    res_mutfak = await resolver.resolve("mutfaktaki ışıkları")
+    assert res_mutfak.resolved is True
+    assert res_mutfak.ambiguous is False
+    assert res_mutfak.top_entity_id == "switch.mutfak_isik"
+    assert res_mutfak.candidates[0].confidence >= 0.85
+    assert res_mutfak.elapsed_ms < 50.0
+
+    # Multiple fixtures in Salon -> must detect ambiguity and NOT auto-resolve
+    res_salon_amb = await resolver.resolve("salon ışıkları")
+    assert res_salon_amb.ambiguous is True
+    assert res_salon_amb.resolved is False
+    assert {c.entity_id for c in res_salon_amb.candidates[:2]} == {
+        "light.salon_tavan",
+        "light.salon_abajur",
+    }
+
+    res_salon_tavan = await resolver.resolve("salon tavan ışığı")
+    assert res_salon_tavan.resolved is True
+    assert res_salon_tavan.top_entity_id == "light.salon_tavan"
+
+    # 3. Verified action learning via HA adapter assert_state -> CoALA entity_memory
+    ha = HomeAssistantWSAdapter(
+        cfg,
+        http_client=httpx.AsyncClient(
+            base_url=cfg.ha_base_url,
+            transport=httpx.MockTransport(ha_http_handler),
+        ),
+        entity_resolver=resolver,
+    )
+    try:
+        # Resolve once (registers pending phrase), then verify state via assert_state
+        await resolver.resolve("yemek tarafı ampulü")
+        # Not yet learned before assert_state
+        assert await resolver.list_memory(status="active") == []
+
+        # Associate 'mutfak ampulü' -> switch.mutfak_isik and assert physical state
+        await resolver.resolve("mutfaktaki ışıkları")
+        assertion = await ha.assert_state("switch.mutfak_isik", expected_state="on")
+        assert assertion.verified is True
+
+        learned = await resolver.list_memory(status="active")
+        assert len(learned) == 1
+        assert learned[0].entity_id == "switch.mutfak_isik"
+        assert learned[0].source == "verified_action"
+        assert learned[0].success_count == 1
+
+        # Exact memory hit must be used on repeat query
+        repeat = await resolver.resolve("mutfaktaki ışıkları")
+        assert repeat.resolved is True
+        assert repeat.candidates[0].match_source == "entity_memory_exact"
+        assert ha.resolve_entity_id("mutfaktaki ışıkları") == "switch.mutfak_isik"
+
+        # 4. User correction marks wrong mapping rejected and activates corrected one
+        await resolver.record_verified_resolution("salon lambam", "light.salon_abajur")
+        await resolver.record_user_correction(
+            phrase="salon lambam",
+            correct_entity_id="light.salon_tavan",
+            wrong_entity_id="light.salon_abajur",
+        )
+        corrected = await resolver.resolve("salon lambam")
+        assert corrected.top_entity_id == "light.salon_tavan"
+        rejected = await resolver.list_memory(status="rejected")
+        assert any(r.entity_id == "light.salon_abajur" and r.failure_count == 1 for r in rejected)
+
+        # 5. Bidirectional HA event sync: rename migrates memory, remove marks stale
+        await resolver.handle_registry_event(
+            "entity_registry_updated",
+            {
+                "action": "update",
+                "entity_id": "switch.mutfak_ana_isik",
+                "old_entity_id": "switch.mutfak_isik",
+            },
+        )
+        migrated_rows = await resolver.list_memory(status="active")
+        assert any(r.entity_id == "switch.mutfak_ana_isik" for r in migrated_rows)
+        assert not any(r.entity_id == "switch.mutfak_isik" for r in migrated_rows)
+
+        await resolver.handle_registry_event(
+            "entity_registry_updated",
+            {"action": "remove", "entity_id": "switch.mutfak_ana_isik"},
+        )
+        stale_rows = await resolver.list_memory(status="stale")
+        assert any(r.entity_id == "switch.mutfak_ana_isik" for r in stale_rows)
+    finally:
+        await resolver.stop()
+        await ha.aclose()
+
+
+@pytest.mark.asyncio
+async def test_action_scheduler_persistence_misfire_and_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _load_test_config(tmp_path, monkeypatch)
+    now_holder = [datetime(2026, 11, 13, 12, 0, 0, tzinfo=UTC)]
+
+    def fake_clock() -> datetime:
+        return now_holder[0]
+
+    class FakeScheduleHA:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str, dict[str, Any]]] = []
+            self.fail_first_assert_for: set[str] = {"climate.bedroom"}
+            self.guard_error_for: set[str] = {"climate.protected"}
+
+        def resolve_entity_id(self, entity_or_alias: str) -> str:
+            return entity_or_alias
+
+        async def call_service(
+            self,
+            domain: str,
+            service: str,
+            entity_id: str,
+            service_data: Mapping[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            if entity_id in self.guard_error_for:
+                raise WindowOpenProtectionError("Window open frost guard active.")
+            self.calls.append((domain, service, entity_id, dict(service_data or {})))
+            return {"status": "dispatched"}
+
+        async def assert_state(
+            self,
+            entity_id: str,
+            expected_state: str | None,
+            timeout_sec: float | None = None,
+            poll_interval_ms: int | None = None,
+            expected_attributes: Mapping[str, Any] | None = None,
+        ) -> StateAssertionResult:
+            if entity_id in self.fail_first_assert_for:
+                self.fail_first_assert_for.remove(entity_id)
+                return StateAssertionFailure(
+                    entity_id=entity_id,
+                    expected_state=expected_state,
+                    actual_state="heat",
+                    elapsed_ms=5,
+                    method="polling",
+                    reason="transient lag",
+                )
+            return StateAssertionSuccess(
+                entity_id=entity_id,
+                expected_state=expected_state,
+                actual_state=expected_state or "ok",
+                elapsed_ms=5,
+                method="polling",
+            )
+
+    backend = FakeScheduleHA()
+    db_file = tmp_path / "scheduler.db"
+    events_seen: list[Any] = []
+
+    sched1 = ActionScheduler(
+        db_path=db_file,
+        ha_adapter=backend,
+        clock=fake_clock,
+        retry_delay_sec=0.0,
+    )
+    sched1.add_event_listener(lambda ev: events_seen.append(ev))
+
+    job_retry = await sched1.schedule_action(
+        domain="climate",
+        service="set_hvac_mode",
+        entity_id="climate.bedroom",
+        delay_seconds=30,
+        service_data={"hvac_mode": "off"},
+        description="Turn off bedroom AC after 30s",
+    )
+    assert job_retry.expected_state == "off"
+    assert job_retry.status == "pending"
+
+    # Simulate crash while job was 'running' before restart
+    with sqlite3.connect(str(db_file)) as conn:
+        conn.execute(
+            "UPDATE scheduled_actions SET status = 'running' WHERE schedule_id = ?",
+            (job_retry.schedule_id,),
+        )
+
+    # Restart recovery in a new ActionScheduler instance on the same SQLite DB
+    sched2 = ActionScheduler(
+        db_path=db_file,
+        ha_adapter=backend,
+        clock=fake_clock,
+        retry_delay_sec=0.0,
+    )
+    sched2.add_event_listener(lambda ev: events_seen.append(ev))
+    await sched2.start()
+    try:
+        recovered = await sched2.get_action(job_retry.schedule_id)
+        assert recovered.status == "pending"
+
+        # Advance fake clock past 30s and execute -> 1st assert fails, automatic retry succeeds!
+        now_holder[0] += timedelta(seconds=35)
+        await sched2.run_due_once()
+        finished = await sched2.get_action(job_retry.schedule_id)
+        assert finished.status == "done"
+        assert finished.attempts == 2
+        assert len([c for c in backend.calls if c[2] == "climate.bedroom"]) == 2
+
+        # Safe-direction misfire policy:
+        # Overdue turn_off (600s late > 300s grace) MUST still run
+        overdue_off = await sched2.schedule_action(
+            domain="switch",
+            service="turn_off",
+            entity_id="switch.mutfak_isik",
+            run_at_utc=now_holder[0] - timedelta(seconds=600),
+            misfire_policy="safe_direction",
+            misfire_grace_sec=300,
+        )
+        # Overdue turn_on (600s late > 300s grace) MUST be skipped safely
+        overdue_on = await sched2.schedule_action(
+            domain="switch",
+            service="turn_on",
+            entity_id="switch.salon_heater",
+            run_at_utc=now_holder[0] - timedelta(seconds=600),
+            misfire_policy="safe_direction",
+            misfire_grace_sec=300,
+        )
+        # GuardViolationError must fail immediately WITHOUT retry (attempts == 1)
+        guarded_job = await sched2.schedule_action(
+            domain="climate",
+            service="set_temperature",
+            entity_id="climate.protected",
+            delay_seconds=1,
+            service_data={"temperature": 22.0},
+        )
+        now_holder[0] += timedelta(seconds=2)
+        await sched2.run_due_once()
+
+        assert (await sched2.get_action(overdue_off.schedule_id)).status == "done"
+        skipped_on = await sched2.get_action(overdue_on.schedule_id)
+        assert skipped_on.status == "skipped"
+        assert not any(c[2] == "switch.salon_heater" for c in backend.calls)
+
+        failed_guard = await sched2.get_action(guarded_job.schedule_id)
+        assert failed_guard.status == "failed"
+        assert failed_guard.attempts == 1
+        assert failed_guard.result is not None
+        assert failed_guard.result.get("error") == "window_open_protection"
+    finally:
+        await sched2.stop()
+
+    assert any(getattr(ev, "type", None) == "schedule_created" for ev in events_seen)
+    assert any(getattr(ev, "type", None) == "schedule_result" and ev.status == "done" for ev in events_seen)
+
+    # Verify FastAPI REST endpoints for entities & schedules
+    api_resolver = EntityResolver(
+        config=cfg,
+        db_path=tmp_path / "api_mem.db",
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        enable_ws_listener=False,
+    )
+    api_resolver.seed_records_for_test(
+        [_make_registry_record("switch.mutfak_isik", "Mutfak Işık", "mutfak", "Mutfak")]
+    )
+    api_ha = HomeAssistantWSAdapter(cfg, entity_resolver=api_resolver)
+    api_app = create_app(config=cfg, ha_adapter=api_ha, entity_resolver=api_resolver)
+    with TestClient(api_app) as client:
+        mem_resp = client.post(
+            "/api/v1/entities/memory",
+            json={"phrase": "akşam lambası", "entity_id": "switch.mutfak_isik"},
+        )
+        assert mem_resp.status_code == 201
+
+        res_resp = client.get("/api/v1/entities/resolve", params={"q": "akşam lambası"})
+        assert res_resp.status_code == 200
+        res_body = res_resp.json()
+        assert res_body["resolved"] is True
+        assert res_body["top_entity_id"] == "switch.mutfak_isik"
+
+        sch_resp = client.post(
+            "/api/v1/schedules",
+            json={
+                "domain": "switch",
+                "service": "turn_off",
+                "entity_id": "switch.mutfak_isik",
+                "delay_seconds": 120,
+                "description": "API timer test",
+            },
+        )
+        assert sch_resp.status_code == 201
+        sid = sch_resp.json()["schedule_id"]
+
+        list_resp = client.get("/api/v1/schedules", params={"status": "pending"})
+        assert list_resp.status_code == 200
+        assert any(item["schedule_id"] == sid for item in list_resp.json())
+
+        del_resp = client.delete(f"/api/v1/schedules/{sid}")
+        assert del_resp.status_code == 200
+        assert del_resp.json()["status"] == "cancelled"
+
+        # Cancelling again returns 409; unknown id returns 404
+        assert client.delete(f"/api/v1/schedules/{sid}").status_code == 409
+        assert client.delete("/api/v1/schedules/nonexistent").status_code == 404
+
 

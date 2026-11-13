@@ -22,6 +22,7 @@ from src.agents.factory import (
     register_sub_agent,
 )
 from src.core.config import AppConfig, SubAgentSettings
+from src.tools.schedule_tools import build_schedule_tools
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +52,30 @@ You are the Home Assistant Specialist Sub-Agent in a hierarchical smart-home orc
      verification outcome.
 """.strip()
 
+_HA_RESOLVER_PROMPT = """
+
+### Fast Entity Resolution Policy (EntityResolver Active)
+- ALWAYS call `resolve_entity(query=..., domain_hint=...)` FIRST whenever you do not already have a verified canonical `entity_id`! It resolves cached memory and registry entities in <10ms without external round-trips.
+- If `resolve_entity` returns `resolved: true` (`confidence >= 0.85`), use `top_entity_id` directly.
+- If `resolve_entity` returns `ambiguous: true` with multiple plausible candidates in different rooms/fixtures, ask for clarification OR inspect `candidates` carefully before mutating physical hardware.
+- If `resolve_entity` returns `resolved: false` (confidence too low or no match), fall back to `ha_mcp_ha_search(query=..., limit=50)` (if available).
+- If the user corrects an entity mapping (e.g. "hayır, diğer oda/ışık"), call `remember_entity_alias(phrase=..., entity_id=..., wrong_entity_id=...)`.
+""".rstrip()
+
+_HA_SCHEDULER_PROMPT = """
+
+### Deferred & Timed Actions Policy (ActionScheduler Active)
+- For timed/deferred requests (e.g. "klimayı 10 dakika çalıştır sonra kapat" or "5 dakika sonra mutfak ışığını kapat"):
+  1. Execute and verify (`assert_entity_state`) any IMMEDIATE action first (e.g. turn on the climate device now).
+  2. Call `schedule_ha_action(delay_seconds=..., domain=..., service=..., entity_id=..., service_data=..., description=...)` for the future part instead of sleeping inside the conversation.
+- Use `list_scheduled_actions` to inspect active timers and `cancel_scheduled_action` when asked to cancel a timer.
+""".rstrip()
+
 _HA_MCP_DISCOVERY_PROMPT = """
 
-### Entity Discovery Policy (HA-MCP Active)
+### Entity Discovery Fallback (HA-MCP Active)
 - NEVER guess or brute-force `entity_id` values with `get_ha_entity_state`.
-- When the exact canonical `entity_id` is not explicitly given or listed in Configured Entity
-  Aliases, ALWAYS search first using `ha_mcp_ha_search` (or `ha_mcp_ha_list_floors_areas` /
-  `ha_mcp_ha_get_overview`).
+- When `resolve_entity` (if available) returns `resolved: false`, fall back to `ha_mcp_ha_search` (or `ha_mcp_ha_list_floors_areas` / `ha_mcp_ha_get_overview`).
 - Search tips for speed and accuracy:
   - Always set `limit=50` in `ha_mcp_ha_search` (the default limit of 10 often fills up with
     `binary_sensor.*` or `sensor.*` entities).
@@ -110,9 +128,19 @@ def build_ha_mcp_client(config: AppConfig) -> MCPClient | None:
 @register_sub_agent("ha")
 def build_ha_sub_agent(settings: SubAgentSettings, ctx: SubAgentBuildContext) -> AgentTool:
     """Build the stateless Home Assistant sub-agent and expose it via `.as_tool()`."""
+    if ctx.entity_resolver is not None and ctx.ha_adapter.entity_resolver is None:
+        ctx.ha_adapter.attach_entity_resolver(ctx.entity_resolver)
+
     tools: list[Any] = list(ctx.ha_adapter.build_tools())
-    mcp_client = build_ha_mcp_client(ctx.config)
     prompt = _HA_BASE_SYSTEM_PROMPT
+    if ctx.ha_adapter.entity_resolver is not None:
+        prompt += _HA_RESOLVER_PROMPT
+
+    if ctx.scheduler is not None:
+        tools.extend(build_schedule_tools(ctx.scheduler))
+        prompt += _HA_SCHEDULER_PROMPT
+
+    mcp_client = build_ha_mcp_client(ctx.config)
     if mcp_client is not None:
         tools.append(mcp_client)
         prompt += _HA_MCP_DISCOVERY_PROMPT
