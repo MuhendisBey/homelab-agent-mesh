@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import logging
+import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -12,6 +17,7 @@ from pydantic import BaseModel
 from src import __version__
 from src.agents.supervisor import SessionOrchestrator, SupervisorRuntime
 from src.api.schemas import (
+    AnnouncementResult,
     ChatStreamRequest,
     EntityMemoryCreateRequest,
     EntityMemoryResponse,
@@ -25,9 +31,20 @@ from src.api.schemas import (
     PendingApprovalSummary,
     ScheduleCreateRequest,
     ScheduleResponse,
+    VoiceAnnounceRequest,
+    VoiceCommandRequest,
+    VoiceCommandResponse,
 )
+from src.core.announcer import Announcer, clean_for_tts, strip_wake_prefix
 from src.core.config import AppConfig
 from src.core.entity_resolver import EntityResolver
+from src.core.events import (
+    ContentDeltaEvent,
+    DoneEvent,
+    InterventionRequiredEvent,
+    ScheduleCreatedEvent,
+    StateAssertionEvent,
+)
 from src.core.exceptions import (
     GuardViolationError,
     HomelabAgentError,
@@ -39,6 +56,7 @@ from src.core.exceptions import (
 from src.core.scheduler import ActionScheduler, ScheduleStatus
 from src.memory.base import BaseMemoryStore
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["orchestrator"])
 
 
@@ -65,6 +83,38 @@ def get_entity_resolver(request: Request) -> EntityResolver:
 def get_scheduler(request: Request) -> ActionScheduler:
     scheduler: ActionScheduler = request.app.state.scheduler
     return scheduler
+
+
+def get_announcer(request: Request) -> Announcer:
+    announcer: Announcer = request.app.state.announcer
+    return announcer
+
+
+def _acquire_ready_session(
+    runtime: SupervisorRuntime,
+    session_id: str | None,
+) -> SessionOrchestrator:
+    session: SessionOrchestrator = runtime.get_or_create_session(session_id)
+    session.prune_expired_approvals()
+    if session.pending_approvals:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": PendingInterventionError.code,
+                "message": "Session is paused awaiting human approval.",
+                "session_id": session.session_id,
+                "pending_approval_ids": list(session.pending_approvals.keys()),
+            },
+        )
+    if session.lock.locked():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": SessionBusyError.code,
+                "message": f"Session '{session.session_id}' is already processing a request.",
+            },
+        )
+    return session
 
 
 async def verify_bearer_token(
@@ -127,27 +177,7 @@ async def chat_stream(
     """Stream structured JSON SSE packets (`plan_step`, `tool_call_start`, `state_assertion`,
     `intervention_required`, `content_delta`, `done`) for a user prompt.
     """
-    session: SessionOrchestrator = runtime.get_or_create_session(body.session_id)
-    if session.prune_expired_approvals() and session.pending_approvals:
-        pass
-    if session.pending_approvals:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": PendingInterventionError.code,
-                "message": "Session is paused awaiting human approval.",
-                "session_id": session.session_id,
-                "pending_approval_ids": list(session.pending_approvals.keys()),
-            },
-        )
-    if session.lock.locked():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error": SessionBusyError.code,
-                "message": f"Session '{session.session_id}' is already processing a request.",
-            },
-        )
+    session = _acquire_ready_session(runtime, body.session_id)
 
     stream = session.stream_prompt(body.prompt)
     return StreamingResponse(
@@ -424,4 +454,212 @@ async def cancel_schedule(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.to_dict()) from exc
     except GuardViolationError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.to_dict()) from exc
+
+
+# ---------------------------------------------------------------------------
+# P4: Voice Gateway (/voice) & HomePod AirPlay TTS Announcer
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _VoiceTurnOutcome:
+    status: Literal["completed", "approval_required", "error"]
+    speech: str
+    verified_entities: list[str]
+    scheduled_ids: list[str]
+    pending_approvals: list[str]
+
+
+async def _consume_voice_turn(
+    session: SessionOrchestrator,
+    prompt: str,
+) -> _VoiceTurnOutcome:
+    text_parts: list[str] = []
+    verified_entities: list[str] = []
+    scheduled_ids: list[str] = []
+    pending_approvals: list[str] = []
+    error_messages: list[str] = []
+    stop_reason = "end_turn"
+
+    try:
+        async for ev in session.stream_prompt(prompt):
+            if isinstance(ev, ContentDeltaEvent):
+                text_parts.append(ev.text)
+            elif isinstance(ev, StateAssertionEvent):
+                if ev.verified and ev.entity and ev.entity not in verified_entities:
+                    verified_entities.append(ev.entity)
+            elif isinstance(ev, ScheduleCreatedEvent):
+                if ev.schedule_id and ev.schedule_id not in scheduled_ids:
+                    scheduled_ids.append(ev.schedule_id)
+            elif isinstance(ev, InterventionRequiredEvent):
+                if ev.approval_id and ev.approval_id not in pending_approvals:
+                    pending_approvals.append(ev.approval_id)
+            elif isinstance(ev, ErrorEvent):
+                if ev.message:
+                    error_messages.append(ev.message)
+            elif isinstance(ev, DoneEvent):
+                stop_reason = ev.stop_reason
+                for approval_id in ev.pending_approvals:
+                    if approval_id and approval_id not in pending_approvals:
+                        pending_approvals.append(approval_id)
+    except HomelabAgentError as exc:
+        error_messages.append(exc.message)
+        stop_reason = "error"
+
+    speech = clean_for_tts("".join(text_parts))
+    if pending_approvals or stop_reason == "interrupt":
+        turn_status: Literal["completed", "approval_required", "error"] = "approval_required"
+        if not speech:
+            speech = "Bu işlem yıkıcı etki içeriyor ve insan onayı bekliyor."
+    elif error_messages or stop_reason == "error":
+        turn_status = "error"
+        if not speech:
+            speech = clean_for_tts(error_messages[-1]) if error_messages else "Komut işlenirken bir hata oluştu."
+    else:
+        turn_status = "completed"
+        if not speech:
+            speech = "İşlem tamamlandı."
+
+    return _VoiceTurnOutcome(
+        status=turn_status,
+        speech=speech,
+        verified_entities=verified_entities,
+        scheduled_ids=scheduled_ids,
+        pending_approvals=pending_approvals,
+    )
+
+
+async def _announce_when_done(
+    task: asyncio.Task[_VoiceTurnOutcome],
+    announcer: Announcer,
+    room: str | None,
+    speaker_entity: str | None,
+) -> None:
+    try:
+        outcome = await task
+        await announcer.announce(
+            outcome.speech,
+            room=room,
+            speaker_entity=speaker_entity,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("voice | background announcement watcher failed")
+
+
+def _track_background_task(request: Request, task: asyncio.Task[Any]) -> None:
+    voice_tasks: set[asyncio.Task[Any]] | None = getattr(request.app.state, "voice_tasks", None)
+    if voice_tasks is None:
+        voice_tasks = set()
+        request.app.state.voice_tasks = voice_tasks
+    voice_tasks.add(task)
+    task.add_done_callback(voice_tasks.discard)
+
+
+@router.post(
+    "/voice",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=VoiceCommandResponse,
+)
+async def voice_command(
+    body: VoiceCommandRequest,
+    request: Request,
+    runtime: SupervisorRuntime = Depends(get_supervisor_runtime),
+    config: AppConfig = Depends(get_app_config),
+    announcer: Announcer = Depends(get_announcer),
+) -> VoiceCommandResponse:
+    """Execute a spoken smart-home command within the synchronous voice timeout budget.
+
+    If execution exceeds `timeout_sec` (default 8s), returns immediately with
+    `status='accepted_background'` while allowing the agent turn to finish and announce
+    its result asynchronously via `Announcer`.
+    """
+    started_at = time.monotonic()
+    session = _acquire_ready_session(runtime, body.session_id)
+    cleaned_prompt, wake_detected = strip_wake_prefix(body.text, config.voice.wake_words)
+    room_note = f" Kullanıcının bulunduğu oda: {body.room.strip()}." if body.room and body.room.strip() else ""
+    augmented_prompt = (
+        "[SESLİ KOMUT MODU] Yanıtını sesli okunmaya uygun, Markdown biçimlendirmesi olmadan, "
+        f"1-2 kısa ve doğal Türkçe cümleyle ver.{room_note}\n\n"
+        f"Kullanıcı komutu: {cleaned_prompt}"
+    )
+
+    bg_task = asyncio.create_task(_consume_voice_turn(session=session, prompt=augmented_prompt))
+    _track_background_task(request, bg_task)
+
+    effective_timeout = body.timeout_sec or config.voice.sync_timeout_sec
+    done, _ = await asyncio.wait({bg_task}, timeout=effective_timeout)
+
+    if bg_task in done:
+        try:
+            outcome = bg_task.result()
+        except Exception as exc:
+            logger.exception("voice | turn failed unexpectedly")
+            outcome = _VoiceTurnOutcome(
+                status="error",
+                speech=clean_for_tts(str(exc)) or "Komut işlenirken beklenmeyen bir hata oluştu.",
+                verified_entities=[],
+                scheduled_ids=[],
+                pending_approvals=[],
+            )
+        announcement: AnnouncementResult | None = None
+        if body.announce:
+            announcement = await announcer.announce(
+                outcome.speech,
+                room=body.room,
+                speaker_entity=body.speaker_entity,
+            )
+        return VoiceCommandResponse(
+            status=outcome.status,
+            speech=outcome.speech,
+            raw_text=body.text,
+            cleaned_prompt=cleaned_prompt,
+            wake_word_detected=wake_detected,
+            session_id=session.session_id,
+            timed_out=False,
+            elapsed_ms=int((time.monotonic() - started_at) * 1000),
+            verified_entities=outcome.verified_entities,
+            scheduled_ids=outcome.scheduled_ids,
+            pending_approvals=outcome.pending_approvals,
+            announcement=announcement,
+        )
+
+    watcher_task = asyncio.create_task(
+        _announce_when_done(
+            task=bg_task,
+            announcer=announcer,
+            room=body.room,
+            speaker_entity=body.speaker_entity,
+        )
+    )
+    _track_background_task(request, watcher_task)
+    return VoiceCommandResponse(
+        status="accepted_background",
+        speech=config.voice.deferred_ack_text,
+        raw_text=body.text,
+        cleaned_prompt=cleaned_prompt,
+        wake_word_detected=wake_detected,
+        session_id=session.session_id,
+        timed_out=True,
+        elapsed_ms=int((time.monotonic() - started_at) * 1000),
+    )
+
+
+@router.post(
+    "/voice/announce",
+    dependencies=[Depends(verify_bearer_token)],
+    response_model=AnnouncementResult,
+)
+async def voice_announce(
+    body: VoiceAnnounceRequest,
+    announcer: Announcer = Depends(get_announcer),
+) -> AnnouncementResult:
+    """Directly dispatch a clean TTS announcement to a room HomePod or target speaker."""
+    return await announcer.announce(
+        message=body.message,
+        room=body.room,
+        speaker_entity=body.speaker_entity,
+        language=body.language,
+    )
 

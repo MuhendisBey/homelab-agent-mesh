@@ -1,5 +1,5 @@
 # Homelab & Smart Home Multi-Agent Mesh (AGENTS.md)
-*Sürüm: v1.2.0 | Son Güncelleme: 2026-11-13 (P1 EntityResolver & P2 ActionScheduler)*
+*Sürüm: v1.3.0 | Son Güncelleme: 2026-11-13 (P4 Voice Gateway & HomePod AirPlay TTS Announcer)*
 
 Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başlamamak; mimariyi, tasarım kararlarını, dosya yapısını, güvenlik kurallarını ve anlık durumu eksiksiz hatırlamak için hazırlanmış operasyonel rehberdir.
 
@@ -32,6 +32,7 @@ Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başl
 │       • GET  /api/v1/health               • POST/GET /api/v1/memory/lessons    │
 │       • GET/POST /api/v1/entities/{resolve,refresh,memory}                     │
 │       • GET/POST/DELETE /api/v1/schedules                                      │
+│       • POST /api/v1/voice                 • POST /api/v1/voice/announce       │
 └────────────────────────────────────┬───────────────────────────────────────────┘
                                      │
                                      ▼
@@ -111,6 +112,11 @@ Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başl
 - **Kaza Kurtarma & Güvenli Yön Misfire Politikası (`safe_direction`):** Konteyner yeniden başlatıldığında `running` kalmış kayıtları kurtarır; `misfire_grace_sec` (varsayılan 300s) geçmiş işlerde yalnızca güvenli kapatma komutlarını (`turn_off`, `close_cover`, `lock`, `hvac_mode=off`) çalıştırır, açma/ısıtma komutlarını atlar.
 - **Çalışma Anı Koruma & Actor-Critic Doğrulama:** Tetikleme anında HVAC/korumalı kaynak guard'larını yeniden denetler, servisi çağırır, `assert_state` ile fiziksel durumu doğrular ve başarısız olursa otomatik 1 kez yeniden dener (`attempts / max_attempts`). SSE akışına `schedule_created`, `schedule_fired`, `schedule_result` olaylarını yayar.
 
+### H. P4 — Sesli Komut Geçidi (`/api/v1/voice`) & HomePod AirPlay TTS `Announcer` (`src/core/announcer.py`)
+- **Türkçe Uyanma Öneki & TTS Temizleyici:** `strip_wake_prefix` (`Hey Kezban`, `Kezban`), `İ/ı` uyumlu biçimde baştaki tetik kelime ve noktalama işaretlerini ayırır; `clean_for_tts`, Markdown işaretlerini doğal tek paragraf konuşma metnine dönüştürür.
+- **8 Saniye Senkron Bütçe & Arka Plan Devri:** `POST /api/v1/voice`, ajanı arka plan görevi olarak başlatır ve `voice.sync_timeout_sec` (varsayılan 8.0s) boyunca `asyncio.wait` ile bekler (görevi **iptal etmez**). Süre içinde biterse doğrudan `speech` (ve `announce=true` ise HomePod TTS sonucu) döner; aşarsa derhal `status="accepted_background"` ile onay cümlesi (`voice.deferred_ack_text`) döner ve görev tamamlandığında sonucu hedef odanın HomePod'una otomatik sesli okur.
+- **Oda Bazlı Hoparlör Yönlendirme & Otomatik Zamanlayıcı Duyurusu:** `Announcer`, `voice.room_speakers`, `EntityResolver` (`media_player`) ve `voice.default_speaker` üzerinden hedef hoparlörü seçer; `tts.speak` (`tts.google_translate_en_com` veya yapılandırılan TTS varlığı) hata verirse otomatik olarak `tts.google_translate_say` yedeğine düşer. `ActionScheduler` `ScheduleResultEvent` olaylarını dinleyerek tamamlanan/başarısız/atlanan zamanlanmış işleri ilgili odadan duyurur.
+
 ---
 
 ## 4. Dizin Yapısı ve Dosya Haritası
@@ -120,7 +126,7 @@ homelab-agent-mesh/
 ├── .dockerignore                    # Gizli .env, settings.yaml ve *.db dışlayıcı (CI/build kalkanı)
 ├── .env.example                     # Gizli veri içermeyen ortam değişkeni şablonu
 ├── .gitignore                       # .env, data/*.db, settings.yaml dışlayıcı
-├── pyproject.toml                   # Hatchling build & bağımlılıklar (v1.2.0)
+├── pyproject.toml                   # Hatchling build & bağımlılıklar (v1.3.0)
 ├── Dockerfile                       # Multi-stage <128 MB RSS hedefli Docker imajı
 ├── docker-compose.yml               # Yerel geliştirme montajları (/var/run/docker.sock, data, config)
 ├── README.md                        # Mimari dokümantasyonu ve cURL örnekleri
@@ -133,10 +139,11 @@ homelab-agent-mesh/
 ├── tests/
 │   └── test_orchestrator.py         # Mypy strict & pytest uçtan uca doğrulama testleri
 └── src/
-    ├── __init__.py                  # Paket versiyonu (1.2.0)
+    ├── __init__.py                  # Paket versiyonu (1.3.0)
     ├── main.py                      # FastAPI başlatıcı, lifecycle yöneticisi ve CLI
     ├── core/
-    │   ├── config.py                # pydantic-settings tabanlı YAML + .env yükleyici
+    │   ├── announcer.py             # P4: HomePod AirPlay TTS Announcer & uyanma eki temizleyici
+    │   ├── config.py                # pydantic-settings tabanlı YAML + .env yükleyici (voice dahil)
     │   ├── entity_resolver.py       # P1: Olay tabanlı HA Grounding Index & CoALA entity_memory
     │   ├── events.py                # Typed SSE olay modelleri ve asenkron QueueEventSink
     │   ├── exceptions.py            # Hiyerarşik domain hataları (CircuitOpen, GuardViolation)
@@ -157,8 +164,8 @@ homelab-agent-mesh/
     │   ├── infra_agent.py           # Homelab altyapı uzman alt-ajanı (stateless)
     │   └── supervisor.py            # Root Supervisor Orkestratör (HITL & sliding memory)
     └── api/
-        ├── schemas.py               # Pydantic HTTP şemaları (chat, entities, schedules)
-        └── routes.py                # /chat/stream, /interventions/*, /entities/*, /schedules, /health
+        ├── schemas.py               # Pydantic HTTP şemaları (chat, entities, schedules, voice)
+        └── routes.py                # /chat/stream, /interventions/*, /entities/*, /schedules, /voice/*, /health
 ```
 
 ---
@@ -167,12 +174,13 @@ homelab-agent-mesh/
 
 - [x] P1 (`EntityResolver` + Türkçe Kök Bulucu + CoALA `entity_memory`) ve P2 (`ActionScheduler`) modülleri yazıldı, Strands ajanlarına ve FastAPI uç noktalarına entegre edildi.
 - [x] `mypy --strict src tests` kontrolünden **27/27 dosya** 0 hata ile geçti; `ruff check` temiz.
-- [x] `pytest -v` ile hafıza, güvenlik kalkanları, bellek zehirlenmesi kalkanı, paralel telemetri, multi-interrupt, Türkçe varlık çözümleme (`EntityResolver`) ve zamanlayıcı (`ActionScheduler`) testleri doğrulandı (**8/8 passed**).
+- [x] `pytest -v` ile hafıza, güvenlik kalkanları, bellek zehirlenmesi kalkanı, paralel telemetri, multi-interrupt, Türkçe varlık çözümleme (`EntityResolver`), zamanlayıcı (`ActionScheduler`) ve ses geçidi + HomePod `Announcer` testleri doğrulandı (**9/9 passed**).
 - [x] Canlı Home Assistant (808 entity) üzerinde konteyner içi uçtan uca doğrulama tamamlandı:
   - `/api/v1/entities/resolve` ile `mutfak isigi` (`9.79 ms`, `entity_memory_exact`), `oturma odasi isik` (`16.72 ms`), `yatak odasindaki klimayi` (`15.09 ms`) sorguları harici embedding çağrısı olmadan tek hamlede çözümlendi.
   - `/api/v1/chat/stream` üzerinden `"Mutfaktaki isiklari ac, 15 saniye sonra geri kapat"` senaryosunda anında açma + `assert_entity_state` + CoALA `entity_memory` öğrenmesi + 15s sonra kalıcı zamanlayıcı ile kapatıp doğrulama (`status: "done"`, `verified: true`) uçtan uca teyit edildi.
-- [x] P3 GitOps temeli hazırlandı: `.dockerignore`, `.github/workflows/ci.yml` (`linux/amd64` → private GHCR), `docs/deployment.md` ve özel `MuhendisBey/homelab-ops` (`SOPS + age + justfile`) dağıtım reposu yapılandırıldı.
-- [x] Sonraki aşamalar (kullanıcı onayında): LXC 900 ilk kurulum + geçiş testi, ardından P4–P5 (`/api/v1/voice`, AirPlay `Announcer`, özel HA `kezban` conversation entegrasyonu).
+- [x] P3 GitOps kurulumu tamamlandı ve servis LXC 900 (`MuhendisBey/homelab-ops`, `SOPS + age + justfile`, Private GHCR `read:packages` PAT) üzerine taşındı.
+- [x] P4 tamamlandı (`v1.3.0`): `POST /api/v1/voice` (8 sn zaman aşımı bütçesi + arka plan devamlılığı), `POST /api/v1/voice/announce` ve zamanlanmış iş sonuçlarını HomePod'lara duyuran `Announcer` servisi eklendi.
+- [ ] Sonraki aşama (P5): Özel Home Assistant `kezban` conversation entegrasyonu + Google STT/TTS + Apple Watch Assist tetiklemesi.
 
 ---
 

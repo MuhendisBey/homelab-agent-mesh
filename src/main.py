@@ -10,9 +10,11 @@ Wires together:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
@@ -22,6 +24,7 @@ from src import __version__
 from src.agents.factory import AgentFactory
 from src.agents.supervisor import SupervisorRuntime
 from src.api.routes import router as api_router
+from src.core.announcer import Announcer
 from src.core.config import AppConfig, get_config
 from src.core.entity_resolver import EntityResolver
 from src.core.scheduler import ActionScheduler
@@ -48,6 +51,7 @@ def create_app(
     factory: AgentFactory | None = None,
     entity_resolver: EntityResolver | None = None,
     scheduler: ActionScheduler | None = None,
+    announcer: Announcer | None = None,
 ) -> FastAPI:
     """Application factory supporting dependency injection for tests and dry-run modes."""
     cfg = config or get_config()
@@ -90,6 +94,14 @@ def create_app(
         )
         await sched.start()
 
+        ann = announcer or Announcer(
+            config=cfg,
+            ha_adapter=ha,
+            entity_resolver=resolver,
+        )
+        sched.add_event_listener(ann.on_schedule_event)
+        voice_tasks: set[asyncio.Task[Any]] = set()
+
         infra = infra_toolkit or HomelabInfraToolkit(cfg)
         agent_factory = factory or AgentFactory(
             config=cfg,
@@ -110,6 +122,8 @@ def create_app(
         app.state.ha_adapter = ha
         app.state.entity_resolver = resolver
         app.state.scheduler = sched
+        app.state.announcer = ann
+        app.state.voice_tasks = voice_tasks
         app.state.infra_toolkit = infra
         app.state.factory = agent_factory
         app.state.runtime = runtime
@@ -123,6 +137,10 @@ def create_app(
         try:
             yield
         finally:
+            for pending_task in list(voice_tasks):
+                pending_task.cancel()
+            if voice_tasks:
+                await asyncio.gather(*voice_tasks, return_exceptions=True)
             await sched.stop()
             await resolver.stop()
             await ha.aclose()

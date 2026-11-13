@@ -10,15 +10,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from strands.models.model import Model
 
 from src.agents.factory import AgentFactory
+from src.core.announcer import Announcer, clean_for_tts, strip_wake_prefix
 from src.core.config import AppConfig
 from src.core.entity_resolver import EntityResolver, RegistryEntityRecord
+from src.core.events import ScheduleResultEvent
 from src.core.exceptions import (
+    HomeAssistantError,
     MemoryPoisoningError,
     ProtectedResourceViolationError,
     SafetyBoundViolationError,
@@ -1024,5 +1028,262 @@ async def test_action_scheduler_persistence_misfire_and_verification(
         # Cancelling again returns 409; unknown id returns 404
         assert client.delete(f"/api/v1/schedules/{sid}").status_code == 409
         assert client.delete("/api/v1/schedules/nonexistent").status_code == 404
+
+
+class DelayedScriptedModel(ScriptedModel):
+    """Scripted model double that sleeps before yielding tokens to test timeout handoff."""
+
+    def __init__(self, steps: list[Any], delay_sec: float = 0.0) -> None:
+        super().__init__(steps)
+        self._delay_sec = delay_sec
+
+    async def stream(
+        self,
+        messages: Any,
+        tool_specs: Any = None,
+        system_prompt: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        if self._delay_sec > 0:
+            await anyio.sleep(self._delay_sec)
+        async for chunk in super().stream(
+            messages=messages,
+            tool_specs=tool_specs,
+            system_prompt=system_prompt,
+            **kwargs,
+        ):
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_voice_gateway_fast_completion_timeout_handoff_and_announcer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _load_test_config(tmp_path, monkeypatch)
+
+    # 1. Wake-word stripping (Turkish I/i safe) & Markdown cleanup
+    assert strip_wake_prefix("Kezban, mutfak ışıklarını aç", cfg.voice.wake_words) == (
+        "mutfak ışıklarını aç",
+        True,
+    )
+    assert strip_wake_prefix("Hey Kezban: klimayı kapat", cfg.voice.wake_words) == (
+        "klimayı kapat",
+        True,
+    )
+    assert strip_wake_prefix("HEY KEZBAN! yatak odası sıcaklığı kaç?", cfg.voice.wake_words) == (
+        "yatak odası sıcaklığı kaç?",
+        True,
+    )
+    assert strip_wake_prefix("İyi akşamlar, ışıkları kapat", cfg.voice.wake_words) == (
+        "İyi akşamlar, ışıkları kapat",
+        False,
+    )
+    assert strip_wake_prefix("Kezban", cfg.voice.wake_words) == ("Kezban", True)
+
+    assert clean_for_tts("## Sonuç\n- **Mutfak Işığı** açıldı (`switch.mutfak_isik`).") == (
+        "Sonuç Mutfak Işığı açıldı (switch.mutfak_isik)."
+    )
+
+    # 2. Announcer speaker routing, tts.speak, fallback to google_translate_say, & scheduler alerts
+    recorded_calls: list[tuple[str, str, str, dict[str, Any]]] = []
+    fail_speak_once = [False]
+
+    class FakeTTSHAAdapter(HomeAssistantWSAdapter):
+        async def call_service(
+            self,
+            domain: str,
+            service: str,
+            entity_id: str,
+            service_data: Mapping[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            if domain == "tts" and service == "speak" and fail_speak_once[0]:
+                fail_speak_once[0] = False
+                raise HomeAssistantError("tts.speak unsupported in mock HA")
+            recorded_calls.append((domain, service, entity_id, dict(service_data or {})))
+            return {"status": "dispatched"}
+
+    resolver = EntityResolver(
+        config=cfg,
+        db_path=tmp_path / "voice_resolver.db",
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        enable_ws_listener=False,
+    )
+    resolver.seed_records_for_test(
+        [
+            _make_registry_record("switch.mutfak_isik", "Mutfak Işığı", "mutfak", "Mutfak"),
+            _make_registry_record(
+                "media_player.kitchen_homepod",
+                "Mutfak HomePod",
+                "mutfak",
+                "Mutfak",
+            ),
+            _make_registry_record(
+                "media_player.living_room_homepod",
+                "Oturma Odası HomePod",
+                "oturma_odasi",
+                "Oturma Odası",
+            ),
+        ]
+    )
+    ha_adapter = FakeTTSHAAdapter(cfg, entity_resolver=resolver)
+    announcer = Announcer(config=cfg, ha_adapter=ha_adapter, entity_resolver=resolver)
+
+    assert await announcer.resolve_speaker(room="mutfak") == "media_player.kitchen_homepod"
+    assert await announcer.resolve_speaker(room="Oturma Odası") == "media_player.living_room_homepod"
+
+    res_speak = await announcer.announce("**Mutfak** ışığı açıldı.", room="mutfak")
+    assert res_speak.delivered is True
+    assert res_speak.tts_service == "tts.speak"
+    assert res_speak.speaker_entity == "media_player.kitchen_homepod"
+    assert res_speak.message == "Mutfak ışığı açıldı."
+    assert recorded_calls[-1] == (
+        "tts",
+        "speak",
+        "tts.google_translate_en_com",
+        {
+            "media_player_entity_id": "media_player.kitchen_homepod",
+            "message": "Mutfak ışığı açıldı.",
+            "language": "tr",
+        },
+    )
+
+    fail_speak_once[0] = True
+    res_fallback = await announcer.announce("Yedek servis testi", room="mutfak")
+    assert res_fallback.delivered is True
+    assert res_fallback.tts_service == "tts.google_translate_say"
+    assert recorded_calls[-1] == (
+        "tts",
+        "google_translate_say",
+        "media_player.kitchen_homepod",
+        {"message": "Yedek servis testi", "language": "tr"},
+    )
+
+    # Scheduler lifecycle result announces to the entity's area speaker (Mutfak), ignoring cancelled
+    calls_before_sched = len(recorded_calls)
+    await announcer.on_schedule_event(
+        ScheduleResultEvent(
+            schedule_id="job-cancel",
+            entity_id="switch.mutfak_isik",
+            status="cancelled",
+            verified=False,
+        )
+    )
+    assert len(recorded_calls) == calls_before_sched
+
+    await announcer.on_schedule_event(
+        ScheduleResultEvent(
+            schedule_id="job-done",
+            entity_id="switch.mutfak_isik",
+            status="done",
+            verified=True,
+            detail="Verified.",
+        )
+    )
+    assert len(recorded_calls) == calls_before_sched + 1
+    assert recorded_calls[-1][3]["media_player_entity_id"] == "media_player.kitchen_homepod"
+    assert "Mutfak Işığı" in recorded_calls[-1][3]["message"]
+
+    # 3. FastAPI /api/v1/voice fast path & slow timeout handoff -> background announcement
+    embedder = LocalHashedNgramEmbedder(dimensions=128)
+    store = ReflectionStore(
+        db_path=tmp_path / "voice_mem.db",
+        embedder=embedder,
+        similarity_threshold=0.5,
+        local_fallback_dimensions=128,
+    )
+    infra_toolkit = HomelabInfraToolkit(cfg)
+
+    session_models = [
+        # Session 1 (fast <8s) builds: HASubAgent, InfraSubAgent, Supervisor
+        ScriptedModel(["noop"]),
+        ScriptedModel(["noop"]),
+        ScriptedModel(["**Mutfak** ışığı açıldı."]),
+        # Session 2 (slow >timeout_sec=0.15) builds: HASubAgent, InfraSubAgent, Supervisor
+        ScriptedModel(["noop"]),
+        ScriptedModel(["noop"]),
+        DelayedScriptedModel(["Oturma odası sistem özeti hazır: her şey normal."], delay_sec=0.35),
+    ]
+
+    def fake_model_factory(model_id: str | None, temperature: float | None) -> Model:
+        return session_models.pop(0)
+
+    factory = AgentFactory(
+        config=cfg,
+        memory_store=store,
+        ha_adapter=ha_adapter,
+        infra_toolkit=infra_toolkit,
+        custom_model_factory=fake_model_factory,
+        entity_resolver=resolver,
+    )
+    app = create_app(
+        config=cfg,
+        memory_store=store,
+        ha_adapter=ha_adapter,
+        infra_toolkit=infra_toolkit,
+        factory=factory,
+        entity_resolver=resolver,
+        announcer=announcer,
+    )
+
+    with TestClient(app) as client:
+        # 3a. Direct /voice/announce endpoint
+        ann_resp = client.post(
+            "/api/v1/voice/announce",
+            json={"message": "`Kezban` hazır.", "room": "oturma odası"},
+        )
+        assert ann_resp.status_code == 200
+        ann_body = ann_resp.json()
+        assert ann_body["delivered"] is True
+        assert ann_body["speaker_entity"] == "media_player.living_room_homepod"
+        assert ann_body["message"] == "Kezban hazır."
+
+        # 3b. Fast synchronous completion within budget
+        fast_resp = client.post(
+            "/api/v1/voice",
+            json={
+                "text": "Kezban, mutfak ışığını aç",
+                "room": "mutfak",
+                "announce": True,
+                "session_id": "voice-fast",
+            },
+        )
+        assert fast_resp.status_code == 200
+        fast_body = fast_resp.json()
+        assert fast_body["status"] == "completed"
+        assert fast_body["timed_out"] is False
+        assert fast_body["wake_word_detected"] is True
+        assert fast_body["cleaned_prompt"] == "mutfak ışığını aç"
+        assert fast_body["speech"] == "Mutfak ışığı açıldı."
+        assert fast_body["announcement"]["delivered"] is True
+        assert fast_body["announcement"]["speaker_entity"] == "media_player.kitchen_homepod"
+
+        # 3c. Slow agent exceeding 0.15s budget -> immediate accepted_background + async HomePod alert
+        calls_before_slow = len(recorded_calls)
+        slow_resp = client.post(
+            "/api/v1/voice",
+            json={
+                "text": "Hey Kezban, tüm homelab durumunu derinlemesine analiz et",
+                "room": "oturma odası",
+                "timeout_sec": 0.15,
+                "session_id": "voice-slow",
+            },
+        )
+        assert slow_resp.status_code == 200
+        slow_body = slow_resp.json()
+        assert slow_body["status"] == "accepted_background"
+        assert slow_body["timed_out"] is True
+        assert slow_body["wake_word_detected"] is True
+        assert slow_body["speech"] == cfg.voice.deferred_ack_text
+        assert slow_body["elapsed_ms"] < 300
+
+        # Wait up to 2.0s for the background task + watcher to finish and dispatch HomePod TTS
+        deadline = time.monotonic() + 2.0
+        while len(recorded_calls) == calls_before_slow and time.monotonic() < deadline:
+            await anyio.sleep(0.05)
+
+        assert len(recorded_calls) == calls_before_slow + 1
+        assert recorded_calls[-1][3]["media_player_entity_id"] == "media_player.living_room_homepod"
+        assert "Oturma odası sistem özeti hazır" in recorded_calls[-1][3]["message"]
 
 

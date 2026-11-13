@@ -173,5 +173,21 @@ server:
   cors_origins: []
   sse_keepalive_sec: 15.0
 
+voice:
+  enabled: true
+  wake_words:
+    - "hey kezban"
+    - "kezban"
+  sync_timeout_sec: 8.0
+  language: "tr"
+  tts_entity: "tts.google_translate_en_com"
+  tts_service: "tts.speak"
+  default_speaker: "media_player.living_room_homepod"
+  room_speakers:
+    oturma_odasi: "media_player.living_room_homepod"
+    mutfak: "media_player.kitchen_homepod"
+  announce_scheduled_results: true
+  deferred_ack_text: "Üzerinde çalışıyorum, tamamlandığında sesli olarak bildireceğim."
+
 plugins: []
 

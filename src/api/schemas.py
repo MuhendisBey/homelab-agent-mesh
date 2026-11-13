@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from src.core.announcer import AnnouncementResult
 from src.core.entity_resolver import (
     EntityCandidate,
     EntityMemoryRecord,
@@ -33,6 +34,7 @@ from src.core.events import (
 from src.core.scheduler import MisfirePolicy, ScheduledActionRecord
 
 __all__ = [
+    "AnnouncementResult",
     "ChatStreamRequest",
     "ContentDeltaEvent",
     "CriticVerdictEvent",
@@ -62,6 +64,9 @@ __all__ = [
     "StreamEvent",
     "ToolCallEndEvent",
     "ToolCallStartEvent",
+    "VoiceAnnounceRequest",
+    "VoiceCommandRequest",
+    "VoiceCommandResponse",
 ]
 
 EntityResolveResponse = EntityResolutionResult
@@ -168,4 +173,41 @@ class ScheduleCreateRequest(BaseModel):
         if self.delay_seconds is None and self.run_at_utc is None:
             raise ValueError("Either delay_seconds or run_at_utc must be provided.")
         return self
+
+
+class VoiceCommandRequest(BaseModel):
+    """Request body for `POST /api/v1/voice`."""
+
+    text: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = Field(default=None, max_length=128)
+    room: str | None = Field(default=None, max_length=128)
+    speaker_entity: str | None = Field(default=None, max_length=256)
+    announce: bool = False
+    timeout_sec: float | None = Field(default=None, gt=0.1, le=60.0)
+
+
+class VoiceCommandResponse(BaseModel):
+    """Response body for `POST /api/v1/voice`."""
+
+    status: Literal["completed", "accepted_background", "approval_required", "error"]
+    speech: str
+    raw_text: str
+    cleaned_prompt: str
+    wake_word_detected: bool
+    session_id: str
+    timed_out: bool = False
+    elapsed_ms: int
+    verified_entities: list[str] = Field(default_factory=list)
+    scheduled_ids: list[str] = Field(default_factory=list)
+    pending_approvals: list[str] = Field(default_factory=list)
+    announcement: AnnouncementResult | None = None
+
+
+class VoiceAnnounceRequest(BaseModel):
+    """Request body for `POST /api/v1/voice/announce`."""
+
+    message: str = Field(min_length=1, max_length=2000)
+    room: str | None = Field(default=None, max_length=128)
+    speaker_entity: str | None = Field(default=None, max_length=256)
+    language: str | None = Field(default=None, max_length=16)
 

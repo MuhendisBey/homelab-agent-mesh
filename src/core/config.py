@@ -214,6 +214,21 @@ class ServerSettings(_StrictModel):
     sse_keepalive_sec: float = Field(gt=0)
 
 
+class VoiceSettings(_StrictModel):
+    """Voice command gateway, TTS, and HomePod AirPlay announcer parameters."""
+
+    enabled: bool = True
+    wake_words: list[str] = Field(default_factory=lambda: ["hey kezban", "kezban"])
+    sync_timeout_sec: float = Field(default=8.0, gt=0.5, le=60.0)
+    language: str = "tr"
+    tts_entity: str = "tts.google_translate_en_com"
+    tts_service: str = "tts.speak"
+    default_speaker: str | None = None
+    room_speakers: dict[str, str] = Field(default_factory=dict)
+    announce_scheduled_results: bool = True
+    deferred_ack_text: str = "Üzerinde çalışıyorum, tamamlandığında sesli olarak bildireceğim."
+
+
 # ---------------------------------------------------------------------------
 # Root settings
 # ---------------------------------------------------------------------------
@@ -265,6 +280,7 @@ class AppConfig(BaseSettings):
     home_assistant: HomeAssistantSettings
     infra: InfraSettings
     server: ServerSettings
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
     plugins: list[str] = Field(
         default_factory=list,
         description="Extra importable modules that register sub-agents / operation resolvers (OCP).",

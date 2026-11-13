@@ -1,4 +1,4 @@
-# Homelab & Smart Home Multi-Agent Orchestrator (`homelab-agent-mesh` v1.2.0)
+# Homelab & Smart Home Multi-Agent Orchestrator (`homelab-agent-mesh` v1.3.0)
 
 Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homelab & Smart Home Orchestrator** built on **Python 3.12+ (`asyncio`)**, **Strands Agents SDK**, and **FastAPI Server-Sent Events (SSE)**.
 
@@ -27,6 +27,8 @@ Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homela
   - Sub-15ms Turkish/English entity resolution (`EntityResolver`) combining a real-time Home Assistant WebSocket registry Grounding Index, dependency-free Turkish agglutinative morphology (`text_tr.py`), and CoALA `entity_memory` backed by SQLite WAL + Beta-Bernoulli confidence scoring (`verified_action` and user corrections).
 - **Persistent Action Scheduler (P2):**
   - Zero-dependency `asyncio` + SQLite (`scheduled_actions`) deferred execution engine (`ActionScheduler`) with crash recovery, `safe_direction` misfire policy, runtime guard enforcement, and Actor-Critic post-action verification (`assert_state` + automatic retry).
+- **Voice Command Gateway & HomePod AirPlay TTS Announcer (P4):**
+  - `POST /api/v1/voice` strips Turkish/English wake prefixes (`Hey Kezban`, `Kezban`), enforces a synchronous voice timeout budget (`voice.sync_timeout_sec`, default `8.0s`), and seamlessly hands off longer tasks to finish in the background and speak results on HomePods via Home Assistant TTS (`tts.speak` with `tts.google_translate_say` fallback) plus automatic announcements for completed `ActionScheduler` tasks.
 - **Pre-Condition Guard Clauses, Parallel Telemetry & Multi-Interrupt Two-Phase Commit:**
   - Blocks out-of-range HVAC setpoints, respects window-open frost protection (`window_open_guard_temp` + contact sensors), and prevents stopping/restarting protected containers or VMs (`ProtectedResourceViolationError`).
   - Parallelizes Docker container telemetry stats via `ThreadPoolExecutor` and `infra.docker_stats_concurrency`.
@@ -56,6 +58,7 @@ homelab-agent-mesh/
     ├── main.py                      # FastAPI SSE entrypoint & lifecycle manager
     ├── core/
     │   ├── __init__.py
+    │   ├── announcer.py             # HomePod AirPlay TTS Announcer & wake-word stripper
     │   ├── config.py                # Pydantic BaseSettings (.env + YAML loader)
     │   ├── entity_resolver.py       # Event-driven HA Grounding Index & CoALA entity_memory
     │   ├── events.py                # Typed SSE event models & async queue sink
@@ -82,7 +85,7 @@ homelab-agent-mesh/
     └── api/
         ├── __init__.py
         ├── schemas.py               # SSE event & request/response Pydantic models
-        └── routes.py                # /chat/stream, /entities/*, /schedules & /health endpoints
+        └── routes.py                # /chat/stream, /entities/*, /schedules, /voice/* & /health endpoints
 ```
 
 ## Quick Start
@@ -109,5 +112,13 @@ curl -N -X POST http://localhost:8080/api/v1/chat/stream \
 curl -N -X POST http://localhost:8080/api/v1/interventions/approve \
   -H "Content-Type: application/json" \
   -d '{"approval_id": "<approval_id_from_sse>", "approved": true}'
+```
+
+### Sending a Voice Command (P4)
+
+```bash
+curl -X POST http://localhost:8080/api/v1/voice \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Kezban, mutfak ışıklarını aç", "room": "mutfak", "announce": false}'
 ```
 
