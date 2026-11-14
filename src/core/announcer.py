@@ -158,6 +158,47 @@ class Announcer:
             return self._ha.resolve_entity_id(default_spk.strip())
         return None
 
+    async def _deliver_fallback_notify(
+        self,
+        clean_msg: str,
+        room: str | None,
+    ) -> AnnouncementResult | None:
+        raw_notify = (self._config.voice.fallback_notify_service or "").strip()
+        if not raw_notify:
+            return None
+
+        domain, sep, service = raw_notify.partition(".")
+        if not sep:
+            domain, service = "notify", raw_notify
+        full_service = f"{domain}.{service}"
+        title = self._config.voice.notify_title.strip() or "Kezban"
+
+        try:
+            await self._ha.call_service(
+                domain=domain,
+                service=service,
+                entity_id="",
+                service_data={"title": title, "message": clean_msg},
+            )
+            return AnnouncementResult(
+                delivered=True,
+                speaker_entity=full_service,
+                room=room,
+                message=clean_msg,
+                tts_service=full_service,
+                reason="fallback_notify",
+            )
+        except Exception as exc:
+            logger.warning("announcer | fallback notify %s failed: %s", full_service, exc)
+            return AnnouncementResult(
+                delivered=False,
+                speaker_entity=full_service,
+                room=room,
+                message=clean_msg,
+                tts_service=full_service,
+                reason=str(exc),
+            )
+
     async def announce(
         self,
         message: str,
@@ -165,7 +206,7 @@ class Announcer:
         speaker_entity: str | None = None,
         language: str | None = None,
     ) -> AnnouncementResult:
-        """Deliver a clean TTS announcement to the resolved HomePod speaker."""
+        """Deliver a clean TTS announcement to HomePod, with optional mobile notify fallback."""
         clean_msg = clean_for_tts(message)
         voice_cfg = self._config.voice
         if not voice_cfg.enabled or not clean_msg:
@@ -178,6 +219,9 @@ class Announcer:
 
         target_speaker = await self.resolve_speaker(room=room, speaker_entity=speaker_entity)
         if target_speaker is None:
+            notify_res = await self._deliver_fallback_notify(clean_msg=clean_msg, room=room)
+            if notify_res is not None:
+                return notify_res
             return AnnouncementResult(
                 delivered=False,
                 room=room,
@@ -218,6 +262,9 @@ class Announcer:
                 fallback_domain, fallback_service = "tts", "google_translate_say"
             except Exception as exc:
                 logger.warning("announcer | tts.speak error: %s", exc)
+                notify_res = await self._deliver_fallback_notify(clean_msg=clean_msg, room=room)
+                if notify_res is not None and notify_res.delivered:
+                    return notify_res
                 return AnnouncementResult(
                     delivered=False,
                     speaker_entity=target_speaker,
@@ -246,6 +293,9 @@ class Announcer:
             )
         except Exception as exc:
             logger.warning("announcer | %s delivery failed: %s", full_fallback, exc)
+            notify_res = await self._deliver_fallback_notify(clean_msg=clean_msg, room=room)
+            if notify_res is not None and notify_res.delivered:
+                return notify_res
             return AnnouncementResult(
                 delivered=False,
                 speaker_entity=target_speaker,

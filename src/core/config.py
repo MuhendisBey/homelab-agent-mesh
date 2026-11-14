@@ -225,6 +225,8 @@ class VoiceSettings(_StrictModel):
     tts_service: str = "tts.speak"
     default_speaker: str | None = None
     room_speakers: dict[str, str] = Field(default_factory=dict)
+    fallback_notify_service: str | None = None
+    notify_title: str = "Kezban"
     announce_scheduled_results: bool = True
     deferred_ack_text: str = "Üzerinde çalışıyorum, tamamlandığında sesli olarak bildireceğim."
 

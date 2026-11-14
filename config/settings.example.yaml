@@ -186,6 +186,8 @@ voice:
   room_speakers:
     oturma_odasi: "media_player.living_room_homepod"
     mutfak: "media_player.kitchen_homepod"
+  fallback_notify_service: null
+  notify_title: "Kezban"
   announce_scheduled_results: true
   deferred_ack_text: "Üzerinde çalışıyorum, tamamlandığında sesli olarak bildireceğim."
 

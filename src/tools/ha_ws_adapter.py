@@ -242,7 +242,7 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
         service_data: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute a single Home Assistant service call over WebSocket with HVAC safety checks."""
-        canonical = self.resolve_entity_id(entity_id)
+        canonical = self.resolve_entity_id(entity_id) if entity_id.strip() else ""
         clean_domain = domain.strip().lower()
         clean_service = service.strip().lower()
         data = dict(service_data or {})
@@ -250,23 +250,26 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
         intent = ServiceCallIntent(
             domain=clean_domain,
             service=clean_service,
-            entity_ids=(canonical,),
+            entity_ids=(canonical,) if canonical else (),
             data=data,
         )
         await self._hvac_guard.validate_intent(intent)
+
+        ws_payload: dict[str, Any] = {
+            "type": "call_service",
+            "domain": clean_domain,
+            "service": clean_service,
+            "service_data": data,
+        }
+        if canonical:
+            ws_payload["target"] = {"entity_id": canonical}
 
         async with self._breaker.guard():
             async with self._ws_session() as ws:
                 await self._send_ws_command(
                     ws,
                     1,
-                    {
-                        "type": "call_service",
-                        "domain": clean_domain,
-                        "service": clean_service,
-                        "target": {"entity_id": canonical},
-                        "service_data": data,
-                    },
+                    ws_payload,
                 )
         return {
             "status": "dispatched",

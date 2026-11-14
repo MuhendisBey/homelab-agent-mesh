@@ -1496,4 +1496,90 @@ async def test_pre_grounding_prompt_unification_and_gemini_embedder_lru_cache(
     assert "Kullanıcı komutu: ışığın durumu nedir?" in captured_prompts[0]
 
 
+@pytest.mark.asyncio
+async def test_plural_possessive_stemming_and_announcer_notify_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.text_tr import infer_domain_hints, stem_tr_token
+
+    # 1. Turkish plural+possessive suffixes strip cleanly down to device roots without breaking -i roots
+    assert stem_tr_token("ışıklarının") == "isik"
+    assert stem_tr_token("ışıklarında") == "isik"
+    assert stem_tr_token("lambalarının") == "lamba"
+    assert stem_tr_token("vanalarının") == "vana"
+    assert stem_tr_token("kapının") == "kapi"
+    assert stem_tr_token("kombinin") == "kombi"
+    assert infer_domain_hints("Mutfak ışıklarının durumu nedir?") == ("light", "switch")
+
+    cfg = _load_test_config(tmp_path, monkeypatch)
+    resolver = EntityResolver(
+        config=cfg,
+        db_path=tmp_path / "plural_resolver.db",
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        enable_ws_listener=False,
+    )
+    resolver.seed_records_for_test(
+        [
+            _make_registry_record("switch.mutfak_isik", "Mutfak Işık", "kitchen", "Mutfak"),
+            _make_registry_record("cover.mutfak_guneslik", "Mutfak Güneşlik", "kitchen", "Mutfak"),
+        ]
+    )
+    res = await resolver.resolve("Mutfak ışıklarının durumu nedir?", limit=3, learn_pending=False)
+    assert res.resolved is True
+    assert res.top_entity_id == "switch.mutfak_isik"
+
+    # 2. Announcer falls back to mobile push notify when no speaker is configured, omitting WS target
+    cfg_notify = cfg.model_copy(
+        update={
+            "voice": cfg.voice.model_copy(
+                update={
+                    "default_speaker": None,
+                    "room_speakers": {},
+                    "fallback_notify_service": "notify.mobile_app_iphone",
+                    "notify_title": "Kezban",
+                }
+            )
+        }
+    )
+
+    sent_ws_payloads: list[dict[str, Any]] = []
+
+    from contextlib import asynccontextmanager
+
+    class FakeWSHAAdapter(HomeAssistantWSAdapter):
+        @asynccontextmanager
+        async def _ws_session(self) -> Any:
+            yield object()
+
+        async def _send_ws_command(
+            self,
+            ws: Any,
+            msg_id: int,
+            payload: dict[str, Any],
+        ) -> dict[str, Any]:
+            sent_ws_payloads.append(dict(payload))
+            return {"id": msg_id, "type": "result", "success": True}
+
+    ws_ha = FakeWSHAAdapter(cfg_notify)
+    announcer = Announcer(config=cfg_notify, ha_adapter=ws_ha, entity_resolver=resolver)
+    notify_res = await announcer.announce("Mutfak ışığı şu anda **kapalı**.", room="mutfak")
+
+    assert notify_res.delivered is True
+    assert notify_res.tts_service == "notify.mobile_app_iphone"
+    assert notify_res.reason == "fallback_notify"
+    assert len(sent_ws_payloads) == 1
+    assert sent_ws_payloads[0] == {
+        "type": "call_service",
+        "domain": "notify",
+        "service": "mobile_app_iphone",
+        "service_data": {
+            "title": "Kezban",
+            "message": "Mutfak ışığı şu anda kapalı.",
+        },
+    }
+    assert "target" not in sent_ws_payloads[0]
+
+
+
 
