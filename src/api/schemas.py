@@ -83,6 +83,15 @@ class ChatStreamRequest(BaseModel):
         max_length=128,
         description="Optional conversation session ID; generated automatically when omitted.",
     )
+    room: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional room/area context (e.g. 'mutfak', 'oturma_odasi').",
+    )
+    response_style: Literal["markdown", "voice"] = Field(
+        default="markdown",
+        description="Output formatting mode ('markdown' for rich UI/CLI, 'voice' for concise spoken Turkish).",
+    )
 
 
 class InterventionDecisionRequest(BaseModel):

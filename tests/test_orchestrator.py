@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from strands.models.model import Model
 
 from src.agents.factory import AgentFactory
-from src.core.announcer import Announcer, clean_for_tts, strip_wake_prefix
+from src.core.announcer import Announcer, clean_for_tts, prepare_prompt_context, strip_wake_prefix
 from src.core.config import AppConfig
 from src.core.entity_resolver import EntityResolver, RegistryEntityRecord
 from src.core.events import ScheduleResultEvent
@@ -40,6 +40,7 @@ from src.core.scheduler import ActionScheduler
 from src.core.text_tr import infer_domain_hints, normalize_tr, stem_tr_phrase
 from src.main import create_app
 from src.memory.reflection_store import (
+    GeminiEmbedder,
     LocalHashedNgramEmbedder,
     ReflectionStore,
     create_record_lesson_tool,
@@ -1285,5 +1286,214 @@ async def test_voice_gateway_fast_completion_timeout_handoff_and_announcer(
         assert len(recorded_calls) == calls_before_slow + 1
         assert recorded_calls[-1][3]["media_player_entity_id"] == "media_player.living_room_homepod"
         assert "Oturma odası sistem özeti hazır" in recorded_calls[-1][3]["message"]
+
+
+@pytest.mark.asyncio
+async def test_pre_grounding_prompt_unification_and_gemini_embedder_lru_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _load_test_config(tmp_path, monkeypatch)
+
+    # 1. GeminiEmbedder LRU cache: stem-normalized hits, failure bypass, and LRU eviction
+    api_calls: list[str] = []
+    fail_next = [False]
+
+    class FakeModels:
+        async def embed_content(self, model: str, contents: str, config: Any = None) -> Any:
+            api_calls.append(contents)
+            if fail_next[0]:
+                fail_next[0] = False
+                raise RuntimeError("transient embedding failure")
+
+            class _Emb:
+                values = [3.0, 4.0]
+
+            class _Resp:
+                embeddings = [_Emb()]
+
+            return _Resp()
+
+    class FakeAio:
+        models = FakeModels()
+
+    class FakeGenAIClient:
+        aio = FakeAio()
+
+    gemini_emb = GeminiEmbedder(
+        api_key="test-key",
+        embedding_model_id="gemini-embedding-2",
+        fallback_dimensions=128,
+        client=FakeGenAIClient(),  # type: ignore[arg-type]
+        cache_size=2,
+    )
+    vec1 = await gemini_emb.embed_text("Mutfak ışığının durumu nedir?")
+    vec2 = await gemini_emb.embed_text("mutfak ışığı durumu ne")
+    assert vec1 == [pytest.approx(0.6), pytest.approx(0.8)]
+    assert vec2 == vec1
+    assert len(api_calls) == 1
+    assert gemini_emb.cache_hits == 1
+    assert gemini_emb.cache_misses == 1
+
+    # Failed API call must NOT be cached
+    fail_next[0] = True
+    with pytest.raises(RuntimeError):
+        await gemini_emb.embed_text("oturma odası kliması")
+    vec3 = await gemini_emb.embed_text("oturma odası kliması")
+    assert len(vec3) == 2
+    assert len(api_calls) == 3
+
+    # Fill capacity (size=2) with another phrase to evict oldest ('mutfak isik')
+    await gemini_emb.embed_text("salon perdesi")
+    await gemini_emb.embed_text("mutfak ışığı")
+    assert len(api_calls) == 5
+
+    # 2. prepare_prompt_context: room-scoped pre-grounding, live state injection, learn_pending=False
+    resolver = EntityResolver(
+        config=cfg,
+        db_path=tmp_path / "preground_resolver.db",
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        enable_ws_listener=False,
+    )
+    resolver.seed_records_for_test(
+        [
+            _make_registry_record("switch.mutfak_isik", "Mutfak Işık", "mutfak", "Mutfak", state="off"),
+            _make_registry_record("light.salon_tavan", "Salon Tavan Işık", "salon", "Salon", state="off"),
+        ]
+    )
+
+    class FakePreGroundHA(HomeAssistantWSAdapter):
+        def __init__(self) -> None:
+            super().__init__(cfg, entity_resolver=resolver)
+            self.live = {
+                "switch.mutfak_isik": EntityState(
+                    entity_id="switch.mutfak_isik",
+                    state="on",
+                    attributes={"brightness": 180},
+                ),
+                "light.salon_tavan": EntityState(
+                    entity_id="light.salon_tavan",
+                    state="off",
+                    attributes={},
+                ),
+            }
+
+        async def get_state(self, entity_id: str) -> EntityState | None:
+            return self.live.get(entity_id)
+
+    ha_mock = FakePreGroundHA()
+
+    prep_room = await prepare_prompt_context(
+        text="Kezban, ışığın durumu nedir?",
+        config=cfg,
+        entity_resolver=resolver,
+        ha_adapter=ha_mock,
+        room="mutfak",
+        response_style="voice",
+    )
+    assert prep_room.wake_word_detected is True
+    assert prep_room.cleaned_prompt == "ışığın durumu nedir?"
+    assert prep_room.pre_grounded_entities == ["switch.mutfak_isik"]
+    assert "[SESLİ KOMUT MODU]" in prep_room.augmented_prompt
+    assert "[ÖN-ÇÖZÜMLENMİŞ VARLIKLAR (Canlı Home Assistant Verisi)]" in prep_room.augmented_prompt
+    assert "switch.mutfak_isik" in prep_room.augmented_prompt
+    assert "canlı_durum='on'" in prep_room.augmented_prompt
+    assert "kesin_eşleşme=evet" in prep_room.augmented_prompt
+    assert resolver.pop_pending_phrase("switch.mutfak_isik") is None
+
+    # Cross-room prompt should resolve the explicitly named room instead of stalling on caller room
+    prep_cross = await prepare_prompt_context(
+        text="Salon tavan ışığını aç",
+        config=cfg,
+        entity_resolver=resolver,
+        ha_adapter=ha_mock,
+        room="mutfak",
+        response_style="markdown",
+    )
+    assert prep_cross.pre_grounded_entities == ["light.salon_tavan"]
+    assert "[ODA BAĞLAMI] Kullanıcının bulunduğu oda: mutfak." in prep_cross.augmented_prompt
+    assert "light.salon_tavan" in prep_cross.augmented_prompt
+
+    # Unrelated chat prompt without room/entities preserves plain text
+    prep_plain = await prepare_prompt_context(
+        text="Sen kimsin ve neler yapabilirsin?",
+        config=cfg,
+        entity_resolver=resolver,
+        ha_adapter=ha_mock,
+    )
+    assert prep_plain.pre_grounded_entities == []
+    assert prep_plain.augmented_prompt == "Sen kimsin ve neler yapabilirsin?"
+
+    # 3. /api/v1/chat/stream unified room + response_style='voice' + pre-grounding delivery
+    captured_prompts: list[str] = []
+
+    class CapturingModel(ScriptedModel):
+        async def stream(
+            self,
+            messages: Any,
+            tool_specs: Any = None,
+            system_prompt: Any = None,
+            **kwargs: Any,
+        ) -> Any:
+            for msg in messages or []:
+                if msg.get("role") == "user":
+                    for block in msg.get("content", []):
+                        if isinstance(block, Mapping) and "text" in block:
+                            captured_prompts.append(str(block["text"]))
+            async for chunk in super().stream(
+                messages=messages,
+                tool_specs=tool_specs,
+                system_prompt=system_prompt,
+                **kwargs,
+            ):
+                yield chunk
+
+    store = ReflectionStore(
+        db_path=tmp_path / "unified_mem.db",
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        similarity_threshold=0.5,
+        local_fallback_dimensions=128,
+    )
+    infra_toolkit = HomelabInfraToolkit(cfg)
+    models_seq: list[Model] = [
+        ScriptedModel(["noop"]),
+        ScriptedModel(["noop"]),
+        CapturingModel(["Mutfak ışığı şu anda açık durumda."]),
+    ]
+    factory = AgentFactory(
+        config=cfg,
+        memory_store=store,
+        ha_adapter=ha_mock,
+        infra_toolkit=infra_toolkit,
+        custom_model_factory=lambda _m, _t: models_seq.pop(0),
+        entity_resolver=resolver,
+    )
+    app = create_app(
+        config=cfg,
+        memory_store=store,
+        ha_adapter=ha_mock,
+        infra_toolkit=infra_toolkit,
+        factory=factory,
+        entity_resolver=resolver,
+    )
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/v1/chat/stream",
+            json={
+                "prompt": "Kezban, ışığın durumu nedir?",
+                "room": "mutfak",
+                "response_style": "voice",
+            },
+        )
+        assert resp.status_code == 200
+        assert "Mutfak ışığı şu anda açık durumda." in resp.text
+
+    assert len(captured_prompts) == 1
+    assert "[SESLİ KOMUT MODU]" in captured_prompts[0]
+    assert "switch.mutfak_isik" in captured_prompts[0]
+    assert "canlı_durum='on'" in captured_prompts[0]
+    assert "Kullanıcı komutu: ışığın durumu nedir?" in captured_prompts[0]
+
 
 

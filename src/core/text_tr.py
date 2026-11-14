@@ -85,6 +85,23 @@ _STOP_WORDS: frozenset[str] = frozenset(
         "off",
         "toggle",
         "set",
+        "an",
+        "anda",
+        "suan",
+        "simdi",
+        "hemen",
+        "acaba",
+        "mi",
+        "mu",
+        "nasil",
+        "var",
+        "yok",
+        "kontrol",
+        "et",
+        "bak",
+        "soyle",
+        "ver",
+        "yap",
     }
 )
 

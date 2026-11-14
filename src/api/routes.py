@@ -35,7 +35,7 @@ from src.api.schemas import (
     VoiceCommandRequest,
     VoiceCommandResponse,
 )
-from src.core.announcer import Announcer, clean_for_tts, strip_wake_prefix
+from src.core.announcer import Announcer, clean_for_tts, prepare_prompt_context
 from src.core.config import AppConfig
 from src.core.entity_resolver import EntityResolver
 from src.core.events import (
@@ -55,6 +55,7 @@ from src.core.exceptions import (
 )
 from src.core.scheduler import ActionScheduler, ScheduleStatus
 from src.memory.base import BaseMemoryStore
+from src.tools.ha_ws_adapter import HomeAssistantWSAdapter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["orchestrator"])
@@ -88,6 +89,11 @@ def get_scheduler(request: Request) -> ActionScheduler:
 def get_announcer(request: Request) -> Announcer:
     announcer: Announcer = request.app.state.announcer
     return announcer
+
+
+def get_ha_adapter(request: Request) -> HomeAssistantWSAdapter | None:
+    ha_adapter: HomeAssistantWSAdapter | None = getattr(request.app.state, "ha_adapter", None)
+    return ha_adapter
 
 
 def _acquire_ready_session(
@@ -173,13 +179,24 @@ async def health_check(
 async def chat_stream(
     body: ChatStreamRequest,
     runtime: SupervisorRuntime = Depends(get_supervisor_runtime),
+    config: AppConfig = Depends(get_app_config),
+    entity_resolver: EntityResolver = Depends(get_entity_resolver),
+    ha_adapter: HomeAssistantWSAdapter | None = Depends(get_ha_adapter),
 ) -> StreamingResponse:
     """Stream structured JSON SSE packets (`plan_step`, `tool_call_start`, `state_assertion`,
     `intervention_required`, `content_delta`, `done`) for a user prompt.
     """
     session = _acquire_ready_session(runtime, body.session_id)
+    prepared = await prepare_prompt_context(
+        text=body.prompt,
+        config=config,
+        entity_resolver=entity_resolver,
+        ha_adapter=ha_adapter,
+        room=body.room,
+        response_style=body.response_style,
+    )
 
-    stream = session.stream_prompt(body.prompt)
+    stream = session.stream_prompt(prepared.augmented_prompt)
     return StreamingResponse(
         _sse_event_generator(stream),
         media_type="text/event-stream",
@@ -568,6 +585,8 @@ async def voice_command(
     runtime: SupervisorRuntime = Depends(get_supervisor_runtime),
     config: AppConfig = Depends(get_app_config),
     announcer: Announcer = Depends(get_announcer),
+    entity_resolver: EntityResolver = Depends(get_entity_resolver),
+    ha_adapter: HomeAssistantWSAdapter | None = Depends(get_ha_adapter),
 ) -> VoiceCommandResponse:
     """Execute a spoken smart-home command within the synchronous voice timeout budget.
 
@@ -577,15 +596,20 @@ async def voice_command(
     """
     started_at = time.monotonic()
     session = _acquire_ready_session(runtime, body.session_id)
-    cleaned_prompt, wake_detected = strip_wake_prefix(body.text, config.voice.wake_words)
-    room_note = f" Kullanıcının bulunduğu oda: {body.room.strip()}." if body.room and body.room.strip() else ""
-    augmented_prompt = (
-        "[SESLİ KOMUT MODU] Yanıtını sesli okunmaya uygun, Markdown biçimlendirmesi olmadan, "
-        f"1-2 kısa ve doğal Türkçe cümleyle ver.{room_note}\n\n"
-        f"Kullanıcı komutu: {cleaned_prompt}"
+    prepared = await prepare_prompt_context(
+        text=body.text,
+        config=config,
+        entity_resolver=entity_resolver,
+        ha_adapter=ha_adapter,
+        room=body.room,
+        response_style="voice",
     )
+    cleaned_prompt = prepared.cleaned_prompt
+    wake_detected = prepared.wake_word_detected
 
-    bg_task = asyncio.create_task(_consume_voice_turn(session=session, prompt=augmented_prompt))
+    bg_task = asyncio.create_task(
+        _consume_voice_turn(session=session, prompt=prepared.augmented_prompt)
+    )
     _track_background_task(request, bg_task)
 
     effective_timeout = body.timeout_sec or config.voice.sync_timeout_sec

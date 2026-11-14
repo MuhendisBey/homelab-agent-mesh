@@ -998,8 +998,19 @@ class EntityResolver:
             return self._exact_memory_aliases[norm_phrase]
         return None
 
+    def update_cached_state(self, entity_id: str, state: str) -> None:
+        """Refresh the cached live state on an indexed registry record."""
+        rec = self._records.get(entity_id)
+        if rec is not None:
+            rec.state = state
+
     def register_pending_resolution(self, query: str, result: EntityResolutionResult) -> None:
         """Track recently resolved candidates so a successful ``assert_state`` teaches memory."""
+        effective_query = query.strip()
+        if len(effective_query.split()) > 3:
+            stemmed, _ = stem_tr_phrase(effective_query)
+            effective_query = stemmed or effective_query
+
         now = time.monotonic()
         # Prune expired entries
         expired = [k for k, (_, ts) in self._recent_resolutions.items() if now - ts > _PENDING_QUERY_TTL_SEC]
@@ -1008,7 +1019,7 @@ class EntityResolver:
 
         for cand in result.candidates[:3]:
             if cand.confidence >= 0.55 and cand.match_source != "static_alias":
-                self._recent_resolutions[cand.entity_id] = (query, now)
+                self._recent_resolutions[cand.entity_id] = (effective_query, now)
 
     def pop_pending_phrase(self, entity_id: str) -> str | None:
         """Return and consume the recent query associated with ``entity_id`` within TTL."""
@@ -1050,6 +1061,7 @@ class EntityResolver:
         query: str,
         domain_hint: str | None = None,
         limit: int = 5,
+        learn_pending: bool = True,
     ) -> EntityResolutionResult:
         """Resolve a natural-language Turkish/English entity reference in <10ms when cached."""
         started = time.perf_counter()
@@ -1253,7 +1265,8 @@ class EntityResolver:
             candidates=ranked,
             elapsed_ms=elapsed_ms,
         )
-        self.register_pending_resolution(raw_query, result)
+        if learn_pending:
+            self.register_pending_resolution(raw_query, result)
         return result
 
     @staticmethod

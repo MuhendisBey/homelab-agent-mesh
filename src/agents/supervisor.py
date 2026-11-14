@@ -82,6 +82,18 @@ You are the Root Supervisor Agent of the Homelab & Smart Home Orchestrator.
      contains multiple destructive operations, preserve and execute every remaining step in
      order as each `approval_id` is resolved.
    - If an operation is denied by the user, acknowledge the denial and do not retry the denied action.
+5. **Pre-Grounded Live Home Assistant Entities**:
+   - If the prompt includes `[ÖN-ÇÖZÜMLENMİŞ VARLIKLAR (Canlı Home Assistant Verisi)]` with
+     `kesin_eşleşme=evet` and a valid `canlı_durum` (not `bilinmiyor`):
+     - For pure read-only status/state questions (no state change, toggle, or schedule requested),
+       answer the user directly from that live Home Assistant data without an extra
+       `home_assistant_agent` round-trip.
+     - For any state-changing action, toggle, or timer (`aç`, `kapat`, `ayarla`, loop, schedule),
+       ALWAYS delegate to `home_assistant_agent` and include the pre-grounded `entity_id` and
+       `canlı_durum` in your task instruction so the sub-agent can act and verify via
+       `assert_entity_state` immediately.
+   - Do NOT call `record_lesson_learned` for routine entity resolutions or state queries that are
+     already provided via pre-grounding.
 """.strip()
 
 

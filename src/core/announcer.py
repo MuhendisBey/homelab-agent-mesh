@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.core.config import AppConfig
-from src.core.entity_resolver import EntityResolver
+from src.core.entity_resolver import EntityCandidate, EntityResolutionResult, EntityResolver
 from src.core.events import ScheduleResultEvent
 from src.core.exceptions import HomelabAgentError
+from src.core.interfaces import BaseStateVerifier, EntityState
 from src.core.text_tr import normalize_tr
 
 logger = logging.getLogger(__name__)
@@ -281,4 +283,193 @@ class Announcer:
             msg = "Geciken zamanlanmış görev güvenlik kuralı nedeniyle atlandı."
 
         await self.announce(msg, room=inferred_room)
+
+
+_PREGROUND_ATTR_KEYS: tuple[str, ...] = (
+    "temperature",
+    "current_temperature",
+    "hvac_action",
+    "brightness",
+    "unit_of_measurement",
+)
+
+
+class PreparedPromptContext(BaseModel):
+    """Unified preprocessed prompt with wake-word stripping, room context, and pre-grounding."""
+
+    raw_text: str
+    cleaned_prompt: str
+    wake_word_detected: bool
+    room: str | None = None
+    response_style: Literal["markdown", "voice"] = "markdown"
+    pre_grounded_entities: list[str] = Field(default_factory=list)
+    augmented_prompt: str
+
+
+def _should_fetch_live_state(
+    entity_resolver: EntityResolver,
+    state_reader: BaseStateVerifier | None,
+    fetch_live_state: bool | None,
+) -> bool:
+    if state_reader is None:
+        return False
+    if fetch_live_state is not None:
+        return fetch_live_state
+    if entity_resolver.last_sync_utc is not None:
+        return True
+    from src.tools.ha_ws_adapter import HomeAssistantWSAdapter
+
+    return getattr(type(state_reader), "get_state", None) is not getattr(
+        HomeAssistantWSAdapter, "get_state", None
+    )
+
+
+async def _resolve_preground_candidates(
+    entity_resolver: EntityResolver,
+    cleaned_prompt: str,
+    clean_room: str | None,
+) -> list[EntityCandidate]:
+    norm_prompt = normalize_tr(cleaned_prompt)
+    if not norm_prompt:
+        return []
+
+    norm_room = normalize_tr(clean_room) if clean_room else ""
+    res: EntityResolutionResult
+    if clean_room and norm_room and norm_room not in norm_prompt:
+        res_room = await entity_resolver.resolve(
+            f"{clean_room} {cleaned_prompt}",
+            limit=3,
+            learn_pending=False,
+        )
+        if res_room.resolved:
+            res = res_room
+        else:
+            res_raw = await entity_resolver.resolve(
+                cleaned_prompt,
+                limit=3,
+                learn_pending=False,
+            )
+            if res_raw.resolved or (
+                res_raw.candidates
+                and (
+                    not res_room.candidates
+                    or res_raw.candidates[0].confidence > res_room.candidates[0].confidence
+                )
+            ):
+                res = res_raw
+            else:
+                res = res_room
+    else:
+        res = await entity_resolver.resolve(
+            cleaned_prompt,
+            limit=3,
+            learn_pending=False,
+        )
+
+    if res.resolved and res.candidates:
+        return list(res.candidates[:1])
+    return [cand for cand in res.candidates[:2] if cand.confidence >= 0.78]
+
+
+async def _fetch_live_state_safe(
+    state_reader: BaseStateVerifier,
+    entity_id: str,
+) -> EntityState | None:
+    try:
+        return await asyncio.wait_for(state_reader.get_state(entity_id), timeout=1.0)
+    except Exception as exc:
+        logger.debug("pre_ground | live state fetch skipped for '%s': %s", entity_id, exc)
+        return None
+
+
+async def prepare_prompt_context(
+    text: str,
+    config: AppConfig,
+    entity_resolver: EntityResolver | None = None,
+    ha_adapter: BaseStateVerifier | None = None,
+    room: str | None = None,
+    response_style: Literal["markdown", "voice"] = "markdown",
+    fetch_live_state: bool | None = None,
+) -> PreparedPromptContext:
+    """Apply shared wake-word stripping, room framing, and live entity pre-grounding."""
+    cleaned_prompt, wake_detected = strip_wake_prefix(text, config.voice.wake_words)
+    clean_room = room.strip() if room and room.strip() else None
+
+    pre_grounded_entities: list[str] = []
+    preground_lines: list[str] = []
+
+    if entity_resolver is not None and cleaned_prompt:
+        candidates = await _resolve_preground_candidates(
+            entity_resolver=entity_resolver,
+            cleaned_prompt=cleaned_prompt,
+            clean_room=clean_room,
+        )
+        if candidates:
+            live_states: list[EntityState | None] = [None] * len(candidates)
+            if ha_adapter is not None and _should_fetch_live_state(
+                entity_resolver=entity_resolver,
+                state_reader=ha_adapter,
+                fetch_live_state=fetch_live_state,
+            ):
+                fetched = await asyncio.gather(
+                    *(_fetch_live_state_safe(ha_adapter, cand.entity_id) for cand in candidates)
+                )
+                live_states = list(fetched)
+
+            for idx, cand in enumerate(candidates):
+                st = live_states[idx]
+                live_state = cand.state
+                live_attrs: dict[str, Any] = {}
+                if st is not None:
+                    live_state = st.state
+                    live_attrs = st.attributes
+                    entity_resolver.update_cached_state(cand.entity_id, st.state)
+
+                pre_grounded_entities.append(cand.entity_id)
+                oda_label = cand.area_name or cand.area_id or "-"
+                state_label = live_state if live_state is not None else "bilinmiyor"
+                exact_label = "evet" if idx == 0 and cand.confidence >= 0.85 else "aday"
+                attr_parts = [
+                    f"{k}={live_attrs[k]}"
+                    for k in _PREGROUND_ATTR_KEYS
+                    if k in live_attrs and live_attrs[k] is not None
+                ]
+                attr_suffix = f", özellikler=({', '.join(attr_parts)})" if attr_parts else ""
+                preground_lines.append(
+                    f"- {cand.entity_id} (ad='{cand.friendly_name}', oda='{oda_label}', "
+                    f"canlı_durum='{state_label}', kesin_eşleşme={exact_label}, "
+                    f"güven={cand.confidence:.2f}{attr_suffix})"
+                )
+
+    sections: list[str] = []
+    if response_style == "voice":
+        room_note = f" Kullanıcının bulunduğu oda: {clean_room}." if clean_room else ""
+        sections.append(
+            "[SESLİ KOMUT MODU] Yanıtını sesli okunmaya uygun, Markdown biçimlendirmesi olmadan, "
+            f"1-2 kısa ve doğal Türkçe cümleyle ver.{room_note}"
+        )
+    elif clean_room:
+        sections.append(f"[ODA BAĞLAMI] Kullanıcının bulunduğu oda: {clean_room}.")
+
+    if preground_lines:
+        sections.append(
+            "[ÖN-ÇÖZÜMLENMİŞ VARLIKLAR (Canlı Home Assistant Verisi)]\n"
+            + "\n".join(preground_lines)
+        )
+
+    if sections:
+        augmented_prompt = "\n\n".join(sections) + f"\n\nKullanıcı komutu: {cleaned_prompt}"
+    else:
+        augmented_prompt = cleaned_prompt
+
+    return PreparedPromptContext(
+        raw_text=text,
+        cleaned_prompt=cleaned_prompt,
+        wake_word_detected=wake_detected,
+        room=clean_room,
+        response_style=response_style,
+        pre_grounded_entities=pre_grounded_entities,
+        augmented_prompt=augmented_prompt,
+    )
+
 

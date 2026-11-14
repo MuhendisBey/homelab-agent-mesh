@@ -55,7 +55,10 @@ You are the Home Assistant Specialist Sub-Agent in a hierarchical smart-home orc
 _HA_RESOLVER_PROMPT = """
 
 ### Fast Entity Resolution Policy (EntityResolver Active)
-- ALWAYS call `resolve_entity(query=..., domain_hint=...)` FIRST whenever you do not already have a verified canonical `entity_id`! It resolves cached memory and registry entities in <10ms without external round-trips.
+- If the task already includes a verified canonical `entity_id` (and `canlı_durum`) from
+  `[ÖN-ÇÖZÜMLENMİŞ VARLIKLAR]`, skip `resolve_entity` (and `get_ha_entity_state` unless extra
+  attributes are needed) and proceed directly to `call_ha_service` + `assert_entity_state`.
+- Otherwise, ALWAYS call `resolve_entity(query=..., domain_hint=...)` FIRST whenever you do not already have a verified canonical `entity_id`! It resolves cached memory and registry entities in <10ms without external round-trips.
 - If `resolve_entity` returns `resolved: true` (`confidence >= 0.85`), use `top_entity_id` directly.
 - If `resolve_entity` returns `ambiguous: true` with multiple plausible candidates in different rooms/fixtures, ask for clarification OR inspect `candidates` carefully before mutating physical hardware.
 - If `resolve_entity` returns `resolved: false` (confidence too low or no match), fall back to `ha_mcp_ha_search(query=..., limit=50)` (if available).

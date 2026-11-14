@@ -16,6 +16,7 @@ import logging
 import math
 import re
 import sqlite3
+from collections import OrderedDict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from strands.types.tools import AgentTool
 
 from src.core.config import AppConfig
 from src.core.exceptions import GuardViolationError, MemoryPoisoningError
+from src.core.text_tr import normalize_tr, stem_tr_phrase
 from src.memory.base import BaseEmbedder, BaseMemoryStore, LessonRecord, RetrievedRules
 
 logger = logging.getLogger(__name__)
@@ -121,7 +123,7 @@ class LocalHashedNgramEmbedder(BaseEmbedder):
 
 
 class GeminiEmbedder(BaseEmbedder):
-    """Google GenAI embedding adapter with automatic local fallback on API error."""
+    """Google GenAI embedding adapter with in-memory LRU cache and local fallback."""
 
     def __init__(
         self,
@@ -129,10 +131,15 @@ class GeminiEmbedder(BaseEmbedder):
         embedding_model_id: str,
         fallback_dimensions: int,
         client: genai.Client | None = None,
+        cache_size: int = 512,
     ) -> None:
         self._model_id = embedding_model_id
         self._client = client or genai.Client(api_key=api_key)
         self._fallback = LocalHashedNgramEmbedder(dimensions=fallback_dimensions)
+        self._cache_size = max(0, cache_size)
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     @property
     def model_name(self) -> str:
@@ -142,7 +149,30 @@ class GeminiEmbedder(BaseEmbedder):
     def fallback(self) -> LocalHashedNgramEmbedder:
         return self._fallback
 
+    @property
+    def cache_hits(self) -> int:
+        return self._cache_hits
+
+    @property
+    def cache_misses(self) -> int:
+        return self._cache_misses
+
+    @staticmethod
+    def _cache_key(text: str) -> str:
+        if len(text) <= 160:
+            _, stems = stem_tr_phrase(text)
+            if stems:
+                return " ".join(sorted(stems))
+        return normalize_tr(text) or text.strip().lower()
+
     async def embed_text(self, text: str) -> list[float]:
+        key = self._cache_key(text) if self._cache_size > 0 else ""
+        if self._cache_size > 0 and key in self._cache:
+            self._cache.move_to_end(key)
+            self._cache_hits += 1
+            return list(self._cache[key])
+
+        self._cache_misses += 1
         response = await self._client.aio.models.embed_content(
             model=self._model_id,
             contents=text,
@@ -151,7 +181,12 @@ class GeminiEmbedder(BaseEmbedder):
         embeddings = response.embeddings or []
         if not embeddings or not embeddings[0].values:
             raise RuntimeError("Empty embedding response from Gemini API.")
-        return _l2_normalize([float(x) for x in embeddings[0].values])
+        vec = _l2_normalize([float(x) for x in embeddings[0].values])
+        if self._cache_size > 0:
+            self._cache[key] = list(vec)
+            if len(self._cache) > self._cache_size:
+                self._cache.popitem(last=False)
+        return vec
 
 
 def build_embedder(config: AppConfig, client: genai.Client | None = None) -> BaseEmbedder:
