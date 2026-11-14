@@ -281,3 +281,4 @@ class Announcer:
             msg = "Geciken zamanlanmış görev güvenlik kuralı nedeniyle atlandı."
 
         await self.announce(msg, room=inferred_room)
+

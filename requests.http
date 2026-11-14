@@ -1,9 +1,9 @@
 ### 1. Sağlık Kontrolü (Health Check)
-GET http://localhost:8028/api/v1/health
+GET {{baseUrl}}/api/v1/health
 
 ### 2. Ajan ile Sohbet / Görev Akışı (Chat Stream)
 # Not: text/event-stream olarak anlık akar.
-POST http://localhost:8028/api/v1/chat/stream
+POST {{baseUrl}}/api/v1/chat/stream
 Content-Type: application/json
 
 {
@@ -11,7 +11,7 @@ Content-Type: application/json
 }
 
 ### 2.1 
-POST http://localhost:8028/api/v1/chat/stream
+POST {{baseUrl}}/api/v1/chat/stream
 Content-Type: application/json
 
 {
@@ -21,11 +21,11 @@ Content-Type: application/json
 #
 
 ### 3. Askıda Bekleyen Onayları Listele (Pending Interventions)
-GET http://localhost:8028/api/v1/interventions/pending
+GET {{baseUrl}}/api/v1/interventions/pending
 
 ### 4. İki Aşamalı Onayı Yanıtla (Approve / Deny)
 # 'approval_id' değerini 2. veya 3. adımdaki yanıttan alıp buraya yapıştırın.
-POST http://localhost:8028/api/v1/interventions/approve
+POST {{baseUrl}}/api/v1/interventions/approve
 Content-Type: application/json
 
 {
@@ -34,12 +34,31 @@ Content-Type: application/json
 }
 
 ### 5. Hafızadaki Dersleri Sorgula (Reflection Memory)
-GET http://localhost:8028/api/v1/memory/lessons?domain=ha&query=pencere
+GET {{baseUrl}}/api/v1/memory/lessons?domain=ha&query=pencere
 
 ### 6.
-POST http://localhost:8028/api/v1/chat/stream
+POST {{baseUrl}}/api/v1/chat/stream
 Content-Type: application/json
 
 {
   "prompt": "Yemek masasi isigini ac."
+}
+
+### 7. Sesli Komut (Voice Gateway - 8 sn zaman aşımı + HomePod bildirimi)
+POST {{baseUrl}}/api/v1/voice
+Content-Type: application/json
+
+{
+  "text": "Kezban, yemek masası ışığını aç",
+  "room": "mutfak",
+  "announce": false
+}
+
+### 8. Doğrudan HomePod Duyuru Testi (Announcer)
+POST {{baseUrl}}/api/v1/voice/announce
+Content-Type: application/json
+
+{
+  "message": "Kezban ses sistemi aktif.",
+  "room": "mutfak"
 }
