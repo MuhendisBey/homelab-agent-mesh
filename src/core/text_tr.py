@@ -49,14 +49,20 @@ _STOP_WORDS: frozenset[str] = frozenset(
         "butun",
         "hepsi",
         "hepsini",
+        "hepsinin",
         "lutfen",
+        "bana",
+        "bize",
+        "biraz",
         "ac",
         "acar",
         "acik",
+        "acikmi",
         "acma",
         "kapa",
         "kapat",
         "kapali",
+        "kapalimi",
         "yak",
         "sondur",
         "calistir",
@@ -93,6 +99,9 @@ _STOP_WORDS: frozenset[str] = frozenset(
         "acaba",
         "mi",
         "mu",
+        "misin",
+        "musun",
+        "miyiz",
         "nasil",
         "var",
         "yok",
@@ -105,7 +114,9 @@ _STOP_WORDS: frozenset[str] = frozenset(
     }
 )
 
-# Stems ending in a vowel that must NOT lose their final vowel during single-letter stripping.
+_TWO_LETTER_ROOTS: frozenset[str] = frozenset({"ev", "su", "tv"})
+
+# Canonical smart-home stems that must not lose a final vowel or final root 'n'.
 _VOWEL_PROTECTED_STEMS: frozenset[str] = frozenset(
     {
         "klima",
@@ -135,6 +146,69 @@ _VOWEL_PROTECTED_STEMS: frozenset[str] = frozenset(
         "koridor",
         "yatak",
         "balkon",
+        "kayra",
+        "supurge",
+        "cati",
+        "kamera",
+        "su",
+        "boru",
+        "kutu",
+        "tente",
+        "jaluzi",
+        "garaj",
+        "teras",
+        "bodrum",
+        "ofis",
+        "hol",
+        "giris",
+        "kiler",
+        "merdiven",
+        "ebeveyn",
+        "somine",
+        "termostat",
+        "guneslik",
+        "sicaklik",
+        "petek",
+        "priz",
+        "isik",
+        "kilit",
+        "zil",
+        "siren",
+        "musluk",
+        "batarya",
+        "pil",
+        "radyator",
+        "vantilator",
+        "aspirator",
+        "televizyon",
+        "hoparlor",
+        "anahtar",
+        "salter",
+        "ampul",
+        "panjur",
+        "stor",
+        "kepenk",
+        "firin",
+        "ekran",
+        "tavan",
+        "kazan",
+        "kat",
+        "ev",
+        "hareket",
+        "nem",
+        "sensor",
+        "alarm",
+        "boyler",
+        "sofben",
+        "sarj",
+        "robot",
+        "dolap",
+        "ocak",
+        "saat",
+        "akilli",
+        "enerji",
+        "bati",
+        "dogu",
         "climate",
         "cover",
         "media",
@@ -143,6 +217,59 @@ _VOWEL_PROTECTED_STEMS: frozenset[str] = frozenset(
         "home",
         "echo",
         "tv",
+    }
+)
+
+# Suffixes starting with Turkish buffer consonant 'n' (kaynastirma n'si).
+# Only valid when attaching to a vowel-final stem and never allowed to eat a root's own 'n'.
+_BUFFER_N_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "ndakini",
+        "ndekini",
+        "ndakinin",
+        "ndekinin",
+        "ndakine",
+        "ndekine",
+        "ndaki",
+        "ndeki",
+        "ndan",
+        "nden",
+        "nda",
+        "nde",
+        "nin",
+        "nun",
+        "ni",
+        "nu",
+        "na",
+        "ne",
+    }
+)
+
+# Suffixes starting with Turkish buffer consonant 's' (possessive -sI/-sIn- after vowels).
+# Must attach to a vowel-final stem and never truncate roots ending in 's' (e.g. teras, ofis).
+_BUFFER_S_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "sindaki",
+        "sindeki",
+        "sundaki",
+        "sindan",
+        "sinden",
+        "sundan",
+        "sinda",
+        "sinde",
+        "sunda",
+        "sinin",
+        "sunun",
+        "sini",
+        "sunu",
+        "sinu",
+        "suna",
+        "sine",
+        "sina",
+        "sin",
+        "sun",
+        "si",
+        "su",
     }
 )
 
@@ -162,12 +289,35 @@ _COMPOUND_SUFFIXES: tuple[str, ...] = (
     "lerini",
     "sindaki",
     "sindeki",
+    "sundaki",
     "sindan",
     "sinden",
+    "sundan",
+    "sinda",
+    "sinde",
+    "sunda",
     "sinin",
     "sunun",
+    "ndakinin",
+    "ndekinin",
+    "ndakini",
+    "ndekini",
+    "ndakine",
+    "ndekine",
     "ndaki",
     "ndeki",
+    "dakinin",
+    "dekinin",
+    "takinin",
+    "tekinin",
+    "dakini",
+    "dekini",
+    "takini",
+    "tekini",
+    "dakine",
+    "dekine",
+    "takine",
+    "tekine",
     "lardan",
     "lerden",
     "larda",
@@ -183,12 +333,11 @@ _COMPOUND_SUFFIXES: tuple[str, ...] = (
     "lar",
     "ler",
     "sini",
+    "sunu",
     "sinu",
     "suna",
     "sine",
     "sina",
-    "indan",
-    "inden",
     "ndan",
     "nden",
     "ini",
@@ -205,6 +354,8 @@ _SHORT_SUFFIXES: tuple[str, ...] = (
     "den",
     "tan",
     "ten",
+    "nda",
+    "nde",
     "nin",
     "nun",
     "sin",
@@ -242,6 +393,15 @@ _HARDENING_MAP: dict[str, str] = {
     "dolab": "dolap",
     "reng": "renk",
     "kapag": "kapak",
+    "kilid": "kilit",
+    "kanad": "kanat",
+    "gecid": "gecit",
+    "devr": "devir",
+    "vakt": "vakit",
+    "ism": "isim",
+    "omr": "omur",
+    "sehr": "sehir",
+    "suy": "su",
 }
 
 _DOMAIN_HINT_MAP: dict[str, tuple[str, ...]] = {
@@ -257,6 +417,7 @@ _DOMAIN_HINT_MAP: dict[str, tuple[str, ...]] = {
     "termostat": ("climate",),
     "kombi": ("climate",),
     "petek": ("climate",),
+    "radyator": ("climate",),
     "vana": ("climate",),
     "isitma": ("climate",),
     "isitici": ("climate", "switch"),
@@ -272,6 +433,9 @@ _DOMAIN_HINT_MAP: dict[str, tuple[str, ...]] = {
     "panjur": ("cover",),
     "stor": ("cover",),
     "kepenk": ("cover",),
+    "guneslik": ("cover",),
+    "jaluzi": ("cover",),
+    "tente": ("cover",),
     "cover": ("cover",),
     "tv": ("media_player",),
     "televizyon": ("media_player",),
@@ -284,6 +448,19 @@ _DOMAIN_HINT_MAP: dict[str, tuple[str, ...]] = {
     "vantilator": ("fan", "switch"),
     "fan": ("fan", "climate"),
     "aspirator": ("fan", "switch"),
+    "supurge": ("vacuum",),
+    "robot": ("vacuum",),
+    "kilit": ("lock", "switch"),
+    "zil": ("siren", "switch", "binary_sensor"),
+    "siren": ("siren", "switch", "binary_sensor"),
+    "alarm": ("siren", "switch", "binary_sensor"),
+    "musluk": ("water_heater", "sensor", "switch"),
+    "boyler": ("water_heater", "sensor", "switch"),
+    "sofben": ("water_heater", "sensor", "switch"),
+    "batarya": ("sensor",),
+    "pil": ("sensor",),
+    "sarj": ("sensor",),
+    "kamera": ("camera",),
     "sicaklik": ("sensor", "climate"),
     "nem": ("sensor",),
     "pencere": ("binary_sensor", "cover"),
@@ -312,6 +489,49 @@ def _unsoften_consonant(stem: str) -> str:
     return stem
 
 
+_BUFFER_SUFFIX_GUARDS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("n", _BUFFER_N_SUFFIXES),
+    ("s", _BUFFER_S_SUFFIXES),
+)
+
+
+def _can_strip_suffix(work: str, suffix: str) -> bool:
+    if not work.endswith(suffix):
+        return False
+    cand = work[: -len(suffix)]
+    if len(cand) < 3 and cand not in _TWO_LETTER_ROOTS:
+        return False
+    for buf_char, guarded_suffixes in _BUFFER_SUFFIX_GUARDS:
+        if suffix in guarded_suffixes:
+            # Buffer consonants ('n', 's') only attach after a vowel and must not truncate consonant stems.
+            if cand[-1] not in "aeiou" or f"{cand}{buf_char}" in _VOWEL_PROTECTED_STEMS:
+                return False
+    return True
+
+
+def _match_known_root_with_single_vowel(work: str) -> str | None:
+    if len(work) < 3 or work[-1] not in _SINGLE_VOWEL_SUFFIXES:
+        return None
+    base = work[:-1]
+    unsoftened = _unsoften_consonant(base)
+    if unsoftened in _VOWEL_PROTECTED_STEMS or base in _HARDENING_MAP:
+        return unsoftened
+    return None
+
+
+def _strip_first_person_possessive(work: str) -> str:
+    if work in _VOWEL_PROTECTED_STEMS or len(work) < 3:
+        return work
+    if work.endswith("m") and work[:-1] in _VOWEL_PROTECTED_STEMS:
+        return work[:-1]
+    if work.endswith(("im", "um")) and len(work) >= 4:
+        base = work[:-2]
+        unsoftened = _unsoften_consonant(base)
+        if unsoftened in _VOWEL_PROTECTED_STEMS or base in _HARDENING_MAP:
+            return unsoftened
+    return work
+
+
 def stem_tr_token(token: str) -> str:
     """Light, deterministic Turkish suffix stripper preserving short roots."""
     work = normalize_tr(token)
@@ -319,20 +539,25 @@ def stem_tr_token(token: str) -> str:
         work = work.split(" ", 1)[0]
     if len(work) <= 2 or work in _VOWEL_PROTECTED_STEMS:
         return _HARDENING_MAP.get(work, work)
+    if direct_base := _match_known_root_with_single_vowel(work):
+        return direct_base
 
     stripped = False
     for suffix in _COMPOUND_SUFFIXES:
-        if work.endswith(suffix) and len(work) - len(suffix) >= 3:
+        if _can_strip_suffix(work, suffix):
             work = work[: -len(suffix)]
             stripped = True
             break
 
     for _ in range(2):
-        if len(work) <= 2 or work in _VOWEL_PROTECTED_STEMS:
-            break
+        unsoftened = _unsoften_consonant(work)
+        if len(work) <= 2 or unsoftened in _VOWEL_PROTECTED_STEMS:
+            return unsoftened
+        if direct_base := _match_known_root_with_single_vowel(work):
+            return direct_base
         matched = False
         for suffix in _SHORT_SUFFIXES:
-            if work.endswith(suffix) and len(work) - len(suffix) >= 3:
+            if _can_strip_suffix(work, suffix):
                 work = work[: -len(suffix)]
                 matched = True
                 stripped = True
@@ -349,13 +574,19 @@ def stem_tr_token(token: str) -> str:
         work = work[:-1]
     elif (
         stripped
-        and len(work) >= 4
         and work not in _VOWEL_PROTECTED_STEMS
-        and work[-1] in _SINGLE_VOWEL_SUFFIXES
-        and _unsoften_consonant(work[:-1]) in _HARDENING_MAP.values()
+        and work[-1] in ("i", "u")
+        and len(work) >= 3
+        and (
+            len(work) >= 4 and work[-2] not in "aeiou"
+            or work[:-1] in _TWO_LETTER_ROOTS
+            or _unsoften_consonant(work[:-1]) in _VOWEL_PROTECTED_STEMS
+            or work[:-1] in _HARDENING_MAP
+        )
     ):
         work = work[:-1]
 
+    work = _strip_first_person_possessive(work)
     return _unsoften_consonant(work)
 
 

@@ -1581,5 +1581,104 @@ async def test_plural_possessive_stemming_and_announcer_notify_fallback(
     assert "target" not in sent_ws_payloads[0]
 
 
+@pytest.mark.asyncio
+async def test_turkish_morphology_edge_cases_and_domain_hints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.text_tr import infer_domain_hints, stem_tr_phrase, stem_tr_token
+
+    # 1. Roots ending in 'n' / 's' must never be truncated by buffer consonants
+    for token in (
+        "salondaki",
+        "salondan",
+        "salona",
+        "salonu",
+        "salonun",
+        "salonunda",
+        "salonundaki",
+        "salonunun",
+        "salondakini",
+    ):
+        assert stem_tr_token(token) == "salon", token
+
+    for token in ("balkondaki", "balkondan", "balkona", "balkonu", "balkonun"):
+        assert stem_tr_token(token) == "balkon", token
+
+    for token in ("fırında", "fırından", "fırındaki", "fırının"):
+        assert stem_tr_token(token) == "firin", token
+
+    for token in ("terasta", "terası", "terasın", "terasındaki", "terasının"):
+        assert stem_tr_token(token) == "teras", token
+
+    # 2. 3rd-person possessive + genitive/locative on consonant roots & -t->-d / vowel drop / su buffer
+    assert stem_tr_token("katındaki") == "kat"
+    assert stem_tr_token("katının") == "kat"
+    assert stem_tr_token("güneşliğinin") == "guneslik"
+    assert stem_tr_token("termostata") == "termostat"
+    assert stem_tr_token("termostatının") == "termostat"
+    assert stem_tr_token("peteğinin") == "petek"
+    assert stem_tr_token("prizinin") == "priz"
+    assert stem_tr_token("sıcaklığının") == "sicaklik"
+    assert stem_tr_token("kilidini") == "kilit"
+    assert stem_tr_token("kilidinin") == "kilit"
+    assert stem_tr_token("suyunun") == "su"
+    assert stem_tr_token("devrini") == "devir"
+    assert stem_tr_token("vaktini") == "vakit"
+
+    # 3. Vowel-ending & short smart-home roots
+    assert stem_tr_token("kayra") == "kayra"
+    assert stem_tr_token("kayradaki") == "kayra"
+    assert stem_tr_token("süpürgeyi") == "supurge"
+    assert stem_tr_token("süpürgenin") == "supurge"
+    assert stem_tr_token("çatıdaki") == "cati"
+    assert stem_tr_token("evdeki") == "ev"
+
+    # 4. Extended domain hints & demonstrative 'su' ("su" == "şu") safety
+    assert infer_domain_hints("Salondaki güneşliğinin durumu") == ("cover",)
+    assert infer_domain_hints("Süpürgenin bataryası kaç?") == ("vacuum", "sensor")
+    assert infer_domain_hints("Mutfak zilini çal") == ("siren", "switch", "binary_sensor")
+    assert infer_domain_hints("Kapı kilidini kontrol et") == ("binary_sensor", "lock", "switch")
+    assert infer_domain_hints("Banyodaki boyleri aç") == ("water_heater", "sensor", "switch")
+    assert infer_domain_hints("Şu ışığı aç") == ("light", "switch")
+    assert stem_tr_phrase("Salondaki güneşliğinin durumu nedir?")[1] == ("salon", "guneslik")
+
+    # 5. End-to-end EntityResolver accuracy on inflected Turkish edge-case queries
+    cfg = _load_test_config(tmp_path, monkeypatch)
+    resolver = EntityResolver(
+        config=cfg,
+        db_path=tmp_path / "edge_tr_resolver.db",
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        enable_ws_listener=False,
+    )
+    resolver.seed_records_for_test(
+        [
+            _make_registry_record("cover.salon_guneslik", "Salon Güneşlik", "salon", "Salon"),
+            _make_registry_record(
+                "climate.kayra_termostat", "Kayra Odası Termostat", "kayra_odasi", "Kayra Odası"
+            ),
+            _make_registry_record("vacuum.roborock", "Robot Süpürge", "salon", "Salon"),
+        ]
+    )
+
+    res_guneslik = await resolver.resolve("Salondaki güneşliğinin durumu", limit=3, learn_pending=False)
+    assert res_guneslik.resolved is True
+    assert res_guneslik.top_entity_id == "cover.salon_guneslik"
+
+    res_termostat = await resolver.resolve(
+        "Kayra odasındaki termostata bak", limit=3, learn_pending=False
+    )
+    assert res_termostat.resolved is True
+    assert res_termostat.top_entity_id == "climate.kayra_termostat"
+
+    res_supurge = await resolver.resolve("Robot süpürgenin durumu nedir?", limit=3, learn_pending=False)
+    assert res_supurge.resolved is True
+    assert res_supurge.top_entity_id == "vacuum.roborock"
+
+    res_supurge_short = await resolver.resolve("Süpürgenin durumu nedir?", limit=3, learn_pending=False)
+    assert res_supurge_short.top_entity_id == "vacuum.roborock"
+
+
+
 
 
