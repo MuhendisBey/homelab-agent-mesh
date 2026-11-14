@@ -1,5 +1,5 @@
 # Homelab & Smart Home Multi-Agent Mesh (AGENTS.md)
-*Sürüm: v1.3.0 | Son Güncelleme: 2026-11-13 (P4 Voice Gateway & HomePod AirPlay TTS Announcer)*
+*Sürüm: v1.3.1 | Son Güncelleme: 2026-11-14 (Pre-Grounding + Embedder LRU Önbelleği + HA Assist Entegrasyon Mimarisi)*
 
 Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başlamamak; mimariyi, tasarım kararlarını, dosya yapısını, güvenlik kurallarını ve anlık durumu eksiksiz hatırlamak için hazırlanmış operasyonel rehberdir.
 
@@ -133,7 +133,8 @@ homelab-agent-mesh/
 ├── docs/
 │   ├── architecture.md              # Detaylı C4 & sekans diyagramları
 │   ├── architecture_roadmap.md      # v2.0 Plugin SDK, Tracing & MQTT yol haritası
-│   └── deployment.md                # P3: Çift repolu GitOps, GHCR & SOPS+age dağıtım stratejisi
+│   ├── deployment.md                # P3: Çift repolu GitOps, GHCR & SOPS+age dağıtım stratejisi
+│   └── ha-integration.md            # P4/P5: HA Assist boru hattı, STT/TTS izolasyonu ve çift yönlü bağımlılık haritası
 ├── config/
 │   └── settings.example.yaml        # Domain, güvenlik sınırları ve ajan şablonu
 ├── tests/
@@ -170,17 +171,17 @@ homelab-agent-mesh/
 
 ---
 
-## 5. Projenin Güncel Durumu (2026-11-13 İtibarıyla)
+## 5. Projenin Güncel Durumu (2026-11-14 İtibarıyla)
 
 - [x] P1 (`EntityResolver` + Türkçe Kök Bulucu + CoALA `entity_memory`) ve P2 (`ActionScheduler`) modülleri yazıldı, Strands ajanlarına ve FastAPI uç noktalarına entegre edildi.
-- [x] `mypy --strict src tests` kontrolünden **27/27 dosya** 0 hata ile geçti; `ruff check` temiz.
-- [x] `pytest -v` ile hafıza, güvenlik kalkanları, bellek zehirlenmesi kalkanı, paralel telemetri, multi-interrupt, Türkçe varlık çözümleme (`EntityResolver`), zamanlayıcı (`ActionScheduler`) ve ses geçidi + HomePod `Announcer` testleri doğrulandı (**9/9 passed**).
+- [x] `mypy --strict src tests` kontrolünden **28/28 dosya** 0 hata ile geçti; `ruff check` temiz.
+- [x] `pytest -v` ile hafıza, güvenlik kalkanları, bellek zehirlenmesi kalkanı, paralel telemetri, multi-interrupt, Türkçe varlık çözümleme (`EntityResolver`), zamanlayıcı (`ActionScheduler`), ses geçidi + HomePod `Announcer` ve Pre-Grounding + `GeminiEmbedder` LRU önbellek testleri doğrulandı (**10/10 passed**).
 - [x] Canlı Home Assistant (808 entity) üzerinde konteyner içi uçtan uca doğrulama tamamlandı:
   - `/api/v1/entities/resolve` ile `mutfak isigi` (`9.79 ms`, `entity_memory_exact`), `oturma odasi isik` (`16.72 ms`), `yatak odasindaki klimayi` (`15.09 ms`) sorguları harici embedding çağrısı olmadan tek hamlede çözümlendi.
   - `/api/v1/chat/stream` üzerinden `"Mutfaktaki isiklari ac, 15 saniye sonra geri kapat"` senaryosunda anında açma + `assert_entity_state` + CoALA `entity_memory` öğrenmesi + 15s sonra kalıcı zamanlayıcı ile kapatıp doğrulama (`status: "done"`, `verified: true`) uçtan uca teyit edildi.
 - [x] P3 GitOps kurulumu tamamlandı ve servis LXC 900 (`MuhendisBey/homelab-ops`, `SOPS + age + justfile`, Private GHCR `read:packages` PAT) üzerine taşındı.
-- [x] P4 tamamlandı (`v1.3.0`): `POST /api/v1/voice` (8 sn zaman aşımı bütçesi + arka plan devamlılığı), `POST /api/v1/voice/announce` ve zamanlanmış iş sonuçlarını HomePod'lara duyuran `Announcer` servisi eklendi.
-- [ ] Sonraki aşama (P5): Özel Home Assistant `kezban` conversation entegrasyonu + Google STT/TTS + Apple Watch Assist tetiklemesi.
+- [x] P4 (`v1.3.0`) & Hız Optimizasyonu (`v1.3.1`): `POST /api/v1/voice` (8 sn zaman aşımı bütçesi + arka plan devamlılığı), `POST /api/v1/voice/announce`, `Announcer` ve birleşik Pre-Grounding (`prepare_prompt_context`) + `GeminiEmbedder` LRU önbelleği canlıda doğrulandı (~14.8 sn -> ~2.6–4.0 sn).
+- [ ] Sonraki aşama (P5): Özel Home Assistant `custom_components/kezban` conversation adaptörü + Google STT/TTS + Apple Watch Assist tetiklemesi (Mimari rehberi: 👉 **[docs/ha-integration.md](docs/ha-integration.md)**).
 
 ---
 
@@ -190,6 +191,7 @@ homelab-agent-mesh/
   - Bu depo (`MuhendisBey/homelab-agent-mesh`, **public**) yalnızca uygulama kodu, testler ve container build CI/CD iş akışını (`.github/workflows/ci.yml`) içerir; konteyner imajı **private GHCR (`ghcr.io/muhendisbey/homelab-agent-mesh`)** paketine `linux/amd64` olarak basılır.
   - Üretim yapılandırması, gerçek `settings.yaml`, SOPS + `age` ile şifreli `.env` sırları (`secrets.env.sops`), `compose.yaml` ve `justfile` tarifleri özel **`MuhendisBey/homelab-ops` (private)** reposunda yaşar (yerelde çalışma alanı kökündeki gitignored `./homelab-ops/` dizini).
   - Ayrıntılı strateji, sekans diyagramları, firewall (`DOCKER-USER`) ve LXC kurulum adımları için 👉 **[docs/deployment.md](docs/deployment.md)** dosyasına başvurun.
+  - Home Assistant Assist boru hattı, STT/TTS izolasyonu ve `custom_components/kezban` entegrasyon sınırı için 👉 **[docs/ha-integration.md](docs/ha-integration.md)** dosyasına başvurun.
 
 ---
 

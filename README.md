@@ -5,6 +5,7 @@ Production-grade, modular, 12-Factor compliant **Hierarchical Multi-Agent Homela
 > 📖 **Documentation:**  
 > - **Architecture & C4 / Sequence Diagrams:** **[docs/architecture.md](docs/architecture.md)**  
 > - **GitOps & Zero-Secret Deployment Strategy:** **[docs/deployment.md](docs/deployment.md)**  
+> - **Home Assistant & Assist Pipeline Integration (P4/P5):** **[docs/ha-integration.md](docs/ha-integration.md)**  
 > - **v2.0 Plugin SDK & Diagnostics Roadmap:** **[docs/architecture_roadmap.md](docs/architecture_roadmap.md)**
 
 ## Key Architectural Highlights
@@ -48,7 +49,8 @@ homelab-agent-mesh/
 ├── docs/
 │   ├── architecture.md
 │   ├── architecture_roadmap.md
-│   └── deployment.md                # Dual-repo GitOps, GHCR & SOPS+age deployment guide
+│   ├── deployment.md                # Dual-repo GitOps, GHCR & SOPS+age deployment guide
+│   └── ha-integration.md            # P4/P5 HA Assist pipeline, STT/TTS isolation & dependency map
 ├── config/
 │   └── settings.example.yaml
 ├── tests/
