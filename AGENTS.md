@@ -131,10 +131,12 @@ homelab-agent-mesh/
 ├── docker-compose.yml               # Yerel geliştirme montajları (/var/run/docker.sock, data, config)
 ├── README.md                        # Mimari dokümantasyonu ve cURL örnekleri
 ├── docs/
+│   ├── architectural_decisions.md     # Mimari & tasarım kararları kataloğu (ADR-01 .. ADR-12)
 │   ├── architecture.md              # Detaylı C4 & sekans diyagramları
 │   ├── architecture_roadmap.md      # v2.0 Plugin SDK, Tracing & MQTT yol haritası
 │   ├── deployment.md                # P3: Çift repolu GitOps, GHCR & SOPS+age dağıtım stratejisi
-│   └── ha-integration.md            # P4/P5: HA Assist boru hattı, STT/TTS izolasyonu ve çift yönlü bağımlılık haritası
+│   ├── ha-integration.md            # P4/P5: HA Assist boru hattı, STT/TTS izolasyonu ve çift yönlü bağımlılık haritası
+│   └── open-discussion.md           # Açık performans tartışmaları ve iyileştirme notları
 ├── config/
 │   └── settings.example.yaml        # Domain, güvenlik sınırları ve ajan şablonu
 ├── tests/
