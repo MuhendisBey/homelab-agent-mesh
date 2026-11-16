@@ -30,9 +30,20 @@ views:
             grid_options:
               columns: full
             content: |
-              ### {{ states('sensor.thermal_twin_advisor_report') }}
+              ## {{ states('sensor.thermal_twin_advisor_report') }}
               ---
-              {{ state_attr('sensor.thermal_twin_advisor_report', 'report_markdown') or states('sensor.thermal_twin_advisor_report') }}
+              {%- set raw = state_attr('sensor.thermal_twin_advisor_report', 'report_markdown') or states('sensor.thermal_twin_advisor_report') -%}
+              {%- for line in raw.split('\n') %}
+              {%- if line.startswith('### ') %}
+              ## {{ line[4:] }}
+              {%- elif line.startswith('|') and '---' not in line %}
+              {{ line | replace('| ', '| <big>') }}
+              {%- elif line.startswith('- ') %}
+              - <big>{{ line[2:] }}</big>
+              {%- else %}
+              {{ line }}
+              {%- endif %}
+              {%- endfor %}
 
       - type: grid
         column_span: 1
@@ -101,16 +112,28 @@ views:
             entities:
               - entity: sensor.living_room_valve_position
                 name: Living Room Valve Position
-              - entity: number.living_room_max_valve_position
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: max_valve_pct
                 name: Living Room Max Valve Limit
+                icon: mdi:valve
+                suffix: " %"
               - entity: sensor.bedroom_valve_position
                 name: Bedroom Valve Position
-              - entity: number.bedroom_max_valve_position
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: max_valve_pct
                 name: Bedroom Max Valve Limit
+                icon: mdi:valve
+                suffix: " %"
               - entity: sensor.study_valve_position
                 name: Study Valve Position
-              - entity: number.study_max_valve_position
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: max_valve_pct
                 name: Study Max Valve Limit
+                icon: mdi:valve
+                suffix: " %"
 
       - type: grid
         column_span: 1
@@ -247,8 +270,6 @@ views:
                 name: Climate Entity
               - entity: sensor.living_room_valve_position
                 name: Valve Position
-              - entity: number.living_room_max_valve_position
-                name: Max Valve Limit
               - entity: binary_sensor.living_room_window_contact
                 name: Window Contact
               - entity: sensor.thermal_twin_living_room_stats
@@ -325,8 +346,6 @@ views:
                 name: Climate Entity
               - entity: sensor.bedroom_valve_position
                 name: Valve Position
-              - entity: number.bedroom_max_valve_position
-                name: Max Valve Limit
               - entity: binary_sensor.bedroom_window_contact
                 name: Window Contact
               - entity: sensor.thermal_twin_bedroom_stats
@@ -403,8 +422,6 @@ views:
                 name: Climate Entity
               - entity: sensor.study_valve_position
                 name: Valve Position
-              - entity: number.study_max_valve_position
-                name: Max Valve Limit
               - entity: binary_sensor.study_window_contact
                 name: Window Contact
               - entity: sensor.thermal_twin_study_stats
