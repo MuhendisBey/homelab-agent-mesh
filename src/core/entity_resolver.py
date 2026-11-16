@@ -222,6 +222,8 @@ class EntityResolver:
         self._debounce_task: asyncio.Task[None] | None = None
         self._last_sync_utc: str | None = None
         self._last_sync_error: str | None = None
+        self._registry_revision: int = 0
+        self._rename_map: dict[str, str] = {}
 
         self._init_db_sync()
         self._rebuild_exact_alias_cache_sync()
@@ -452,11 +454,18 @@ class EntityResolver:
                     self._records[entity_id] = old_rec.model_copy(
                         update={"entity_id": entity_id, "domain": _extract_domain(entity_id)}
                     )
+                for old_k, prev_v in list(self._rename_map.items()):
+                    if prev_v == old_entity_id:
+                        self._rename_map[old_k] = entity_id
+                self._rename_map[old_entity_id.lower()] = entity_id
+                self._raw_aliases[old_entity_id.lower()] = entity_id
                 logger.info(
                     "entity_resolver | entity renamed '%s' -> '%s'; migrated entity_memory",
                     old_entity_id,
                     entity_id,
                 )
+
+        self._registry_revision += 1
 
         if self._ha is not None:
             self._schedule_debounced_refresh()
@@ -498,6 +507,7 @@ class EntityResolver:
             self._records = rebuilt
             self._last_sync_utc = _utc_now_iso()
             self._last_sync_error = None
+            self._registry_revision += 1
 
             async with self._write_lock:
                 await asyncio.to_thread(self._save_snapshot_sync, rebuilt)
@@ -1050,6 +1060,14 @@ class EntityResolver:
     @property
     def last_sync_utc(self) -> str | None:
         return self._last_sync_utc
+
+    @property
+    def registry_revision(self) -> int:
+        return self._registry_revision
+
+    @property
+    def rename_map(self) -> dict[str, str]:
+        return dict(self._rename_map)
 
     def _upsert_candidate(
         self,

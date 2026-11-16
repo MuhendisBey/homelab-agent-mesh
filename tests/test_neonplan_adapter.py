@@ -500,3 +500,90 @@ def test_schema_variation_fallbacks_and_zone_resolution(tmp_path: Path) -> None:
     assert topology.resolve_zone("calisma odasi") is study
     assert topology.resolve_zone("study_area") is study
     assert topology.resolve_zone("r_hall") is hall
+
+
+def test_reconcile_stale_entities_via_aliases_and_hw_tokens(tmp_path: Path) -> None:
+    """Verify NeonPlanAdapter heals renamed entities via entity_aliases and hardware-token matching."""
+    from src.core.entity_resolver import RegistryEntityRecord
+    from src.core.text_tr import normalize_tr, stem_tr_phrase
+
+    def _rec(eid: str, area: str) -> RegistryEntityRecord:
+        norm = normalize_tr(eid.replace(".", " "))
+        _, stems = stem_tr_phrase(norm, strip_stopwords=False)
+        _, area_stems = stem_tr_phrase(area, strip_stopwords=False)
+        return RegistryEntityRecord(
+            entity_id=eid,
+            domain=eid.split(".", 1)[0],
+            friendly_name=eid,
+            area_id=area,
+            area_name=area,
+            search_text_norm=norm,
+            search_stems=stems,
+            area_stems=area_stems,
+        )
+
+    floorplan: dict[str, Any] = {
+        "building": {
+            "version": 1,
+            "floors": [
+                {
+                    "id": "ground",
+                    "name": "Ground",
+                    "height": 2.6,
+                    "rooms": [
+                        {
+                            "id": "room_hall",
+                            "name": "Hall",
+                            "area_id": "hall",
+                            "points": [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]],
+                            "climate": {
+                                "entity_id": "climate.hall_trv",
+                                "temperature": "sensor.old_alias_temp",
+                                "valve": "sensor.old_hall_zn10_valve_position",
+                            },
+                            "furniture": [
+                                {
+                                    "id": "rad_hall",
+                                    "type": "radiator",
+                                    "x": 1.0,
+                                    "z": 0.2,
+                                    "climate_entity": "climate.hall_trv",
+                                }
+                            ],
+                        }
+                    ],
+                    "placements": [
+                        {
+                            "entity_id": "sensor.old_alias_temp",
+                            "room_id": "room_hall",
+                            "sensor_type": "temperature",
+                            "x": 1.1,
+                            "z": 0.2,
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    plan_path = tmp_path / "floorplan.json"
+    plan_path.write_text(json.dumps(floorplan), encoding="utf-8")
+
+    records = [
+        _rec("climate.hall_trv", "hall"),
+        _rec("sensor.hall_renamed_radiator_temp", "hall"),
+        _rec("sensor.hall_zn10_valve_position", "hall"),
+    ]
+    aliases = {"sensor.old_alias_temp": "sensor.hall_renamed_radiator_temp"}
+
+    topology = NeonPlanAdapter().load(
+        plan_path,
+        registry_records=records,
+        entity_aliases=aliases,
+    )
+    hall = topology.zones["hall"]
+    assert hall.valve_position_sensors == ["sensor.hall_zn10_valve_position"]
+    healed_sp = next(s for s in hall.temperature_sensors if s.entity_id == "sensor.hall_renamed_radiator_temp")
+    assert healed_sp.x == pytest.approx(1.1)
+    assert healed_sp.z == pytest.approx(0.2)
+    assert healed_sp.placement == "on_radiator"
+    assert all(s.entity_id != "sensor.old_alias_temp" for s in hall.temperature_sensors)

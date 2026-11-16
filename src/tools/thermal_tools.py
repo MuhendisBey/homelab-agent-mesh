@@ -151,7 +151,7 @@ class ThermalTwinService:
         self._loop_task: asyncio.Task[None] | None = None
         self._anomaly_cooldowns: dict[str, float] = {}
         self._last_briefing_date: date | None = None
-        self._last_registry_count = 0
+        self._last_registry_marker: tuple[int, int, str | None] = (0, 0, None)
 
     @property
     def topology(self) -> BuildingTopology:
@@ -184,6 +184,7 @@ class ThermalTwinService:
     def _load_topology_sync(
         self,
         registry_records: list[RegistryEntityRecord] | None,
+        entity_aliases: Mapping[str, str] | None = None,
     ) -> BuildingTopology:
         plan_path = self._config.neonplan_json_path
         if not plan_path.exists():
@@ -201,16 +202,23 @@ class ThermalTwinService:
             json_path=plan_path,
             overrides_path=overrides_path,
             registry_records=registry_records,
+            entity_aliases=entity_aliases,
         )
 
     async def _load_topology(self) -> BuildingTopology:
-        records = (
-            self._entity_resolver.list_registry_records()
-            if self._entity_resolver is not None
-            else None
-        )
-        self._last_registry_count = len(records) if records else 0
-        return await asyncio.to_thread(self._load_topology_sync, records)
+        if self._entity_resolver is not None:
+            records = self._entity_resolver.list_registry_records()
+            aliases = self._entity_resolver.rename_map
+            self._last_registry_marker = (
+                len(records),
+                self._entity_resolver.registry_revision,
+                self._entity_resolver.last_sync_utc,
+            )
+        else:
+            records = None
+            aliases = None
+            self._last_registry_marker = (0, 0, None)
+        return await asyncio.to_thread(self._load_topology_sync, records, aliases)
 
     async def initialize(self) -> None:
         """Initialize SQLite store, parse building topology, and build physics engine."""
@@ -325,13 +333,14 @@ class ThermalTwinService:
             await self.publish_advisor_report(summary_state=summary, report_markdown=md)
 
     async def _maybe_refresh_topology(self) -> None:
-        if (
-            self._entity_resolver is not None
-            and self._entity_resolver.registry_size > 0
-            and self._entity_resolver.registry_size != self._last_registry_count
-            and self._config.neonplan_json_path.exists()
-        ):
-            await self.refresh_topology()
+        if self._entity_resolver is not None and self._config.neonplan_json_path.exists():
+            current_marker = (
+                self._entity_resolver.registry_size,
+                self._entity_resolver.registry_revision,
+                self._entity_resolver.last_sync_utc,
+            )
+            if self._entity_resolver.registry_size > 0 and current_marker != self._last_registry_marker:
+                await self.refresh_topology()
 
     async def run_live_tick(
         self,

@@ -459,6 +459,22 @@ async def test_thermal_service_tick_history_and_virtual_sensor_publishing(
         fallback_md = await service.run_daily_briefing()
         assert "Günlük Termal İkiz Özeti" in fallback_md
         assert published_sensors["sensor.thermal_twin_advisor_report"]["attributes"]["report_markdown"] == fallback_md
+
+        # Entity rename event keeps registry_size unchanged -> registry_revision change triggers reload
+        prev_rev = resolver.registry_revision
+        await resolver.handle_registry_event(
+            "entity_registry_updated",
+            {
+                "action": "update",
+                "old_entity_id": "sensor.study_humidity",
+                "entity_id": "sensor.study_renamed_humidity",
+            },
+        )
+        assert resolver.registry_revision > prev_rev
+        assert resolver.rename_map["sensor.study_humidity"] == "sensor.study_renamed_humidity"
+        await service.run_live_tick(publish=False, trigger_advisor=False)
+        assert "sensor.study_renamed_humidity" in service.topology.zones["study"].humidity_sensors
+        assert "sensor.study_humidity" not in service.topology.zones["study"].humidity_sensors
     finally:
         await service.aclose()
         await http_client.aclose()

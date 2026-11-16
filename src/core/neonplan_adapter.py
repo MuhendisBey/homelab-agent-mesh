@@ -19,6 +19,15 @@ from src.core.text_tr import normalize_tr
 logger = logging.getLogger(__name__)
 
 _NON_SNAKE_RE = re.compile(r"[^a-z0-9]+")
+_HW_TOKEN_RE = re.compile(r"(device\d+|zn\d+)")
+_METRIC_SUFFIXES: tuple[str, ...] = (
+    "actual_temperature",
+    "valve_position",
+    "max_valve_posistion",
+    "max_valve_position",
+    "humidity",
+    "temperature",
+)
 _WALL_ASSIGN_TOL_M = 0.35
 _OPENING_ASSIGN_TOL_M = 0.50
 
@@ -509,6 +518,7 @@ class NeonPlanAdapter:
         json_path: str | Path,
         overrides_path: str | Path | None = None,
         registry_records: Sequence[RegistryEntityRecord] | None = None,
+        entity_aliases: Mapping[str, str] | None = None,
     ) -> BuildingTopology:
         """Load NeonPlan JSON and optional YAML overrides from disk."""
         plan_file = Path(json_path)
@@ -530,13 +540,19 @@ class NeonPlanAdapter:
                     "thermal_overrides file not found at '%s'; continuing without overrides", ov_file
                 )
 
-        return self.parse_dict(raw_payload, overrides=overrides, registry_records=registry_records)
+        return self.parse_dict(
+            raw_payload,
+            overrides=overrides,
+            registry_records=registry_records,
+            entity_aliases=entity_aliases,
+        )
 
     def parse_dict(
         self,
         payload: Mapping[str, Any],
         overrides: Mapping[str, Any] | None = None,
         registry_records: Sequence[RegistryEntityRecord] | None = None,
+        entity_aliases: Mapping[str, str] | None = None,
     ) -> BuildingTopology:
         """Parse an in-memory NeonPlan dictionary with optional overrides and HA registry records."""
         building = payload.get("building")
@@ -709,6 +725,14 @@ class NeonPlanAdapter:
 
         # Pass 6: Apply thermal_overrides.yaml
         self._apply_overrides(zones, room_id_to_zone_id, ov_map)
+
+        # Pass 6.5: Heal stale entity IDs from NeonPlan / overrides using aliases & HA registry
+        if registry_records or entity_aliases:
+            self._reconcile_stale_entities(
+                zones,
+                registry_records or (),
+                entity_aliases=entity_aliases,
+            )
 
         # Pass 7: Synthesize virtual eTRV sensors from climate_entities & classify all sensors
         for zone in zones.values():
@@ -1395,6 +1419,88 @@ class NeonPlanAdapter:
                     e for e in zone.valve_position_sensors if e not in excluded_set
                 ]
                 zone.contact_sensors = [e for e in zone.contact_sensors if e not in excluded_set]
+
+    @staticmethod
+    def _reconcile_stale_entities(
+        zones: Mapping[str, ZoneTopology],
+        registry_records: Sequence[RegistryEntityRecord],
+        entity_aliases: Mapping[str, str] | None = None,
+    ) -> None:
+        """Heal stale entity IDs via explicit rename aliases and HA hardware-token matching."""
+        reg_by_id: dict[str, RegistryEntityRecord] = {r.entity_id: r for r in registry_records}
+        active_records: list[RegistryEntityRecord] = [r for r in registry_records if not r.disabled]
+        alias_lookup: dict[str, str] = (
+            {k.strip().lower(): v.strip() for k, v in entity_aliases.items() if k.strip() and v.strip()}
+            if entity_aliases
+            else {}
+        )
+
+        def _resolve_eid(eid: str, zone: ZoneTopology) -> str:
+            if eid in reg_by_id:
+                return eid
+            mapped = alias_lookup.get(eid.lower())
+            if mapped and (mapped in reg_by_id or not reg_by_id):
+                return mapped
+            if active_records and "." in eid:
+                domain = eid.split(".", 1)[0]
+                eid_low = eid.lower()
+                hw_match = _HW_TOKEN_RE.search(eid_low)
+                metric = next(
+                    (m for m in _METRIC_SUFFIXES if eid_low.endswith(m) or f"_{m}" in eid_low),
+                    None,
+                )
+                if hw_match is not None and metric is not None:
+                    hw_tok = hw_match.group(1)
+                    candidates = [
+                        r
+                        for r in active_records
+                        if r.domain == domain
+                        and hw_tok in r.entity_id.lower()
+                        and (r.entity_id.lower().endswith(metric) or f"_{metric}" in r.entity_id.lower())
+                    ]
+                    if len(candidates) == 1:
+                        return candidates[0].entity_id
+                    if len(candidates) > 1 and zone.area_id:
+                        z_area = normalize_tr(zone.area_id)
+                        area_matches = [
+                            c for c in candidates if c.area_id and normalize_tr(c.area_id) == z_area
+                        ]
+                        if len(area_matches) == 1:
+                            return area_matches[0].entity_id
+            return eid
+
+        def _heal_list(items: list[str], zone: ZoneTopology) -> list[str]:
+            healed: list[str] = []
+            for item in items:
+                _append_unique(healed, _resolve_eid(item, zone))
+            return healed
+
+        for zone in zones.values():
+            zone.climate_entities = _heal_list(zone.climate_entities, zone)
+            zone.humidity_sensors = _heal_list(zone.humidity_sensors, zone)
+            zone.valve_position_sensors = _heal_list(zone.valve_position_sensors, zone)
+            zone.contact_sensors = _heal_list(zone.contact_sensors, zone)
+            if zone.max_valve_entity is not None:
+                zone.max_valve_entity = _resolve_eid(zone.max_valve_entity, zone)
+            for rad in zone.radiators:
+                if rad.climate_entity:
+                    rad.climate_entity = _resolve_eid(rad.climate_entity, zone)
+
+            merged_temps: dict[str, SensorPlacement] = {}
+            for sp in zone.temperature_sensors:
+                resolved_eid = _resolve_eid(sp.entity_id, zone)
+                updated = (
+                    sp.model_copy(update={"entity_id": resolved_eid})
+                    if resolved_eid != sp.entity_id
+                    else sp
+                )
+                prev = merged_temps.get(resolved_eid)
+                if prev is None or (
+                    (prev.x is None or prev.z is None)
+                    and (updated.x is not None and updated.z is not None)
+                ):
+                    merged_temps[resolved_eid] = updated
+            zone.temperature_sensors = list(merged_temps.values())
 
     def _finalize_zone_sensors(
         self,
