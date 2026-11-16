@@ -1,5 +1,5 @@
 # Homelab & Smart Home Multi-Agent Mesh (AGENTS.md)
-*Sürüm: v1.3.1 | Son Güncelleme: 2026-11-14 (Pre-Grounding + Embedder LRU Önbelleği + HA Assist Entegrasyon Mimarisi)*
+*Sürüm: v2.0.0 | Son Güncelleme: 2026-11-16 (Spatial Thermal Digital Twin & Grey-Box RC Estimator — `ThermalSubAgent`)*
 
 Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başlamamak; mimariyi, tasarım kararlarını, dosya yapısını, güvenlik kurallarını ve anlık durumu eksiksiz hatırlamak için hazırlanmış operasyonel rehberdir.
 
@@ -126,7 +126,7 @@ homelab-agent-mesh/
 ├── .dockerignore                    # Gizli .env, settings.yaml ve *.db dışlayıcı (CI/build kalkanı)
 ├── .env.example                     # Gizli veri içermeyen ortam değişkeni şablonu
 ├── .gitignore                       # .env, data/*.db, settings.yaml dışlayıcı
-├── pyproject.toml                   # Hatchling build & bağımlılıklar (v1.3.0)
+├── pyproject.toml                   # Hatchling build & bağımlılıklar (v2.0.0)
 ├── Dockerfile                       # Multi-stage <128 MB RSS hedefli Docker imajı
 ├── docker-compose.yml               # Yerel geliştirme montajları (/var/run/docker.sock, data, config)
 ├── README.md                        # Mimari dokümantasyonu ve cURL örnekleri
@@ -138,33 +138,45 @@ homelab-agent-mesh/
 │   ├── ha-integration.md            # P4/P5: HA Assist boru hattı, STT/TTS izolasyonu ve çift yönlü bağımlılık haritası
 │   └── open-discussion.md           # Açık performans tartışmaları ve iyileştirme notları
 ├── config/
-│   └── settings.example.yaml        # Domain, güvenlik sınırları ve ajan şablonu
+│   ├── settings.example.yaml        # Domain, güvenlik sınırları ve ajan şablonu
+│   ├── thermal_overrides.example.yaml # Opsiyonel termal fizik/bina zarfı override şablonu
+│   └── lovelace_thermal_dashboard.yaml # Termal Dijital İkiz Lovelace pano şablonu
 ├── tests/
-│   └── test_orchestrator.py         # Mypy strict & pytest uçtan uca doğrulama testleri
+│   ├── test_orchestrator.py         # Mypy strict & pytest uçtan uca doğrulama testleri
+│   ├── test_neonplan_adapter.py     # NeonPlan 3D geometri, duvar komşuluğu ve sensör eşleme testleri
+│   ├── test_thermal_engine.py       # Psikrometri, RC soğuma fit, şok/rebound ve simülasyon testleri
+│   └── test_thermal_agent.py        # HAHistoryClient, ThermalTwinService ve ThermalSubAgent testleri
 └── src/
-    ├── __init__.py                  # Paket versiyonu (1.3.0)
+    ├── __init__.py                  # Paket versiyonu (2.0.0)
     ├── main.py                      # FastAPI başlatıcı, lifecycle yöneticisi ve CLI
     ├── core/
     │   ├── announcer.py             # P4: HomePod AirPlay TTS Announcer & uyanma eki temizleyici
-    │   ├── config.py                # pydantic-settings tabanlı YAML + .env yükleyici (voice dahil)
+    │   ├── config.py                # pydantic-settings tabanlı YAML + .env yükleyici (voice & thermal dahil)
     │   ├── entity_resolver.py       # P1: Olay tabanlı HA Grounding Index & CoALA entity_memory
     │   ├── events.py                # Typed SSE olay modelleri ve asenkron QueueEventSink
     │   ├── exceptions.py            # Hiyerarşik domain hataları (CircuitOpen, GuardViolation)
     │   ├── guards.py                # Devre kesici (CircuitBreaker), HVAC ve Docker kalkanları
     │   ├── interfaces.py            # BaseStateVerifier ve EventEmitter protokolleri (DIP)
+    │   ├── neonplan_adapter.py      # v2.0: NeonPlan 3D JSON ayrıştırıcı & ZoneTopology grafiği
+    │   ├── psychrometrics.py        # v2.0: Magnus-Tetens mutlak nem, çiğlenme noktası & entalpi
     │   ├── scheduler.py             # P2: SQLite + asyncio kalıcı ActionScheduler
-    │   └── text_tr.py               # Türkçe metin normalizasyonu, kök bulucu ve domain ipucu çıkarıcı
+    │   ├── text_tr.py               # Türkçe metin normalizasyonu, kök bulucu ve domain ipucu çıkarıcı
+    │   └── thermal_engine.py        # v2.0: Deterministik Grey-Box RC fizik & geçmiş analiz motoru
     ├── memory/
     │   ├── base.py                  # BaseMemoryStore ve BaseEmbedder soyut arayüzleri
-    │   └── reflection_store.py      # SQLite + Gemini / Local N-gram 3 katmanlı hafıza
+    │   ├── reflection_store.py      # SQLite + Gemini / Local N-gram 3 katmanlı hafıza
+    │   └── thermal_store.py         # v2.0: SQLite WAL zone modelleri ve termal gözlem deposu
     ├── tools/
+    │   ├── ha_history_client.py     # v2.0: Async HA /api/history/period okuyucu & sanal sensör yayıncısı
     │   ├── ha_ws_adapter.py         # HA WebSocket/REST adaptörü, resolve_entity & assert_entity_state
     │   ├── infra_mcp_server.py      # FastMCP uyumlu psutil, Docker ve Proxmox araç kiti
-    │   └── schedule_tools.py        # P2: schedule_ha_action / list / cancel Strands araçları
+    │   ├── schedule_tools.py        # P2: schedule_ha_action / list / cancel Strands araçları
+    │   └── thermal_tools.py         # v2.0: ThermalTwinService & Strands termal araçları
     ├── agents/
     │   ├── factory.py               # Sub-agent plugin kayıt sistemi, InterventionHandler & hooks
     │   ├── ha_agent.py              # Home Assistant uzman alt-ajanı (stateless)
     │   ├── infra_agent.py           # Homelab altyapı uzman alt-ajanı (stateless)
+    │   ├── thermal_agent.py         # v2.0: Mekânsal Termal Dijital İkiz uzman alt-ajanı (stateless)
     │   └── supervisor.py            # Root Supervisor Orkestratör (HITL & sliding memory)
     └── api/
         ├── schemas.py               # Pydantic HTTP şemaları (chat, entities, schedules, voice)
@@ -183,6 +195,7 @@ homelab-agent-mesh/
   - `/api/v1/chat/stream` üzerinden `"Mutfaktaki isiklari ac, 15 saniye sonra geri kapat"` senaryosunda anında açma + `assert_entity_state` + CoALA `entity_memory` öğrenmesi + 15s sonra kalıcı zamanlayıcı ile kapatıp doğrulama (`status: "done"`, `verified: true`) uçtan uca teyit edildi.
 - [x] P3 GitOps kurulumu tamamlandı ve servis LXC 900 (`MuhendisBey/homelab-ops`, `SOPS + age + justfile`, Private GHCR `read:packages` PAT) üzerine taşındı.
 - [x] P4 (`v1.3.0`) & Hız Optimizasyonu (`v1.3.1`): `POST /api/v1/voice` (8 sn zaman aşımı bütçesi + arka plan devamlılığı), `POST /api/v1/voice/announce`, `Announcer` ve birleşik Pre-Grounding (`prepare_prompt_context`) + `GeminiEmbedder` LRU önbelleği canlıda doğrulandı (~14.8 sn -> ~2.6–4.0 sn).
+- [x] **v2.0.0 (Spatial Thermal Digital Twin & Grey-Box RC Estimator):** `NeonPlanAdapter` (Shoelace alan/hacim, duvar komşuluğu, `<0.5m` radyatör yakınlık sınıflandırması), `psychrometrics.py`, `ThermalPhysicsEngine` (eTRV radyasyon sapması füzyonu, gece soğuma $k_{\text{loss}}$ fit, havalandırma şoku/rebound & dirsek noktası, hidrolik denge ve parametrik simülasyon), `ThermalStore` (SQLite WAL), `HAHistoryClient`, `ThermalSubAgent` ve canlı Home Assistant `thermal-twin` Lovelace panosu doğrulandı (`22/22` pytest, `38/38` `mypy --strict`).
 - [ ] Sonraki aşama (P5): Özel Home Assistant `custom_components/kezban` conversation adaptörü + Google STT/TTS + Apple Watch Assist tetiklemesi (Mimari rehberi: 👉 **[docs/ha-integration.md](docs/ha-integration.md)**).
 
 ---

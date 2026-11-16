@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "homelab-agent-mesh"
-version = "1.3.3"
+version = "2.0.0"
 description = "Production-grade Hierarchical Multi-Agent Homelab & Smart Home Orchestrator built with Strands Agents SDK and FastAPI SSE."
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,6 +25,8 @@ dependencies = [
   "httpx>=0.27.0",
   "psutil>=6.0.0",
   "docker>=7.1.0",
+  "numpy>=2.0.0",
+  "scipy>=1.14.0",
 ]
 
 [project.optional-dependencies]

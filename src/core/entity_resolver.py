@@ -1039,6 +1039,10 @@ class EntityResolver:
         """Inject synthetic registry records directly (intended for unit tests)."""
         self._records = {r.entity_id: r for r in records}
 
+    def list_registry_records(self) -> list[RegistryEntityRecord]:
+        """Return a snapshot of all indexed Home Assistant registry entities."""
+        return list(self._records.values())
+
     @property
     def registry_size(self) -> int:
         return len(self._records)

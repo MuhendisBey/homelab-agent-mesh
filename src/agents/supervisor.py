@@ -1,8 +1,9 @@
 """Root Supervisor Orchestrator with Sliding-Window Memory, Two-Phase Commit & SSE Streaming.
 
 Responsibilities:
-- Multi-intent task decomposition across Home Assistant (`home_assistant_agent`) and
-  Infrastructure (`infrastructure_agent`) sub-agents via Strands `.as_tool()`.
+- Multi-intent task decomposition across Home Assistant (`home_assistant_agent`),
+  Infrastructure (`infrastructure_agent`), and Thermal Digital Twin (`thermal_twin_agent`)
+  sub-agents via Strands `.as_tool()`.
 - Short-term conversation memory via `SlidingWindowConversationManager`.
 - Self-healing rule persistence via `record_lesson_learned`.
 - Two-Phase Commit (Human-in-the-Loop) interrupt suspension, token issuance, and
@@ -64,7 +65,14 @@ You are the Root Supervisor Agent of the Homelab & Smart Home Orchestrator.
 ### Core Responsibilities
 1. **Task Decomposition & Routing**:
    - Break multi-intent user prompts into an ordered plan and delegate domain tasks to your
-     specialist sub-agents (`home_assistant_agent`, `infrastructure_agent`).
+     specialist sub-agents:
+     - `home_assistant_agent`: smart-home device control, state assertions, entity resolution,
+       and scheduled actions.
+     - `infrastructure_agent`: host CPU/RAM/disk telemetry, Docker containers, and Proxmox VMs.
+     - `thermal_twin_agent`: spatial thermal digital twin diagnostics (true ambient temp vs.
+       radiator eTRV bias, RC cooling/warmup constants `k_loss`/`tau_hours`, ventilation
+       shock/rebound timing, overnight projections, dew-point/mold risk analysis, hydraulic
+       valve balancing, and thermal advisor dashboard reporting).
 2. **Actor-Critic Verification**:
    - Require sub-agents to report both the action taken and the post-action verification
      (`assert_entity_state` for Home Assistant; container/guest status verification for
@@ -73,8 +81,8 @@ You are the Root Supervisor Agent of the Homelab & Smart Home Orchestrator.
      safety guard.
 3. **Self-Healing Reflection Memory**:
    - When a recurring device quirk, entity mapping, or logical parameter fix is confirmed,
-     call `record_lesson_learned` with the appropriate domain (`ha` or `infra`) so future
-     tasks automatically apply it.
+     call `record_lesson_learned` with the appropriate domain (`ha`, `infra`, or `thermal`) so
+     future tasks automatically apply it.
    - NEVER record transient network, timeout, or circuit-breaker errors (e.g., `TimeoutError`,
      `ConnectionError`, `circuit_open`, or temporary reachability failures) into memory.
 4. **Human-in-the-Loop Interventions**:
@@ -88,6 +96,11 @@ You are the Root Supervisor Agent of the Homelab & Smart Home Orchestrator.
      - For pure read-only status/state questions (no state change, toggle, or schedule requested),
        answer the user directly from that live Home Assistant data without an extra
        `home_assistant_agent` round-trip.
+     - However, any question involving thermal digital twin diagnostics, true ambient
+       temperature (radiator eTRV bias), cooling/warmup constants, ventilation timing/rebound,
+       overnight thermal projections, dew-point/mold risk, hydraulic balancing, or thermal
+       advisor dashboard reports MUST be delegated to `thermal_twin_agent` rather than
+       answering from raw thermostat/eTRV values alone.
      - For any state-changing action, toggle, or timer (`aç`, `kapat`, `ayarla`, loop, schedule),
        ALWAYS delegate to `home_assistant_agent` and include the pre-grounded `entity_id` and
        `canlı_durum` in your task instruction so the sub-agent can act and verify via

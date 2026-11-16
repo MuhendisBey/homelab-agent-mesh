@@ -1,0 +1,352 @@
+# ==============================================================================
+# homelab-agent-mesh - Spatial Thermal Digital Twin Lovelace Dashboard Template
+# ==============================================================================
+# Public-safe, ready-to-import Home Assistant Lovelace Dashboard configuration.
+# Replace the example zone slugs (`living_room`, `bedroom`, `study`) and entity
+# IDs with your own Home Assistant zones and NeonPlan-derived `zone_id` slugs.
+#
+# Import in Home Assistant:
+#   Settings -> Dashboards -> Add Dashboard -> New dashboard from scratch ->
+#   Edit Dashboard (top-right pencil) -> Three dots -> Raw configuration editor ->
+#   Paste this YAML and Save.
+# ==============================================================================
+
+title: Thermal Digital Twin
+views:
+  - type: sections
+    title: Overview & Advisor
+    path: overview
+    icon: mdi:home-thermometer-outline
+    max_columns: 3
+    sections:
+      - type: grid
+        column_span: 3
+        cards:
+          - type: heading
+            heading: Thermal Digital Twin Advisor
+            icon: mdi:robot-outline
+          - type: markdown
+            title: Morning Thermal Briefing & Diagnostics
+            content: |
+              ### {{ states('sensor.thermal_twin_advisor_report') }}
+              ---
+              {{ state_attr('sensor.thermal_twin_advisor_report', 'report_markdown') or states('sensor.thermal_twin_advisor_report') }}
+
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Outdoor & Heating Plant
+            icon: mdi:weather-partly-cloudy
+          - type: entities
+            title: Envelope Boundary Conditions
+            show_header_toggle: false
+            entities:
+              - entity: weather.home
+                name: Local Weather
+              - entity: sensor.outdoor_temperature
+                name: Outdoor Temperature
+              - entity: sensor.heating_pump_modulation
+                name: Boiler / Pump Modulation
+              - entity: switch.hydraulic_balancing
+                name: Hydraulic Balancing
+
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: True Ambient vs. Raw eTRV Summary
+            icon: mdi:thermometer-check
+          - type: entities
+            title: Living Room (Calibrated vs. Raw)
+            show_header_toggle: false
+            entities:
+              - entity: sensor.thermal_twin_living_room_true_temp
+                name: True Ambient Temp
+              - entity: climate.living_room_thermostat
+                name: Raw Thermostat / eTRV
+              - entity: sensor.living_room_temperature
+                name: Ambient Sensor
+              - entity: sensor.thermal_twin_living_room_stats
+                name: Cooling Rate (Stats)
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: night_min_temp_c
+                name: Overnight Min Projection
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: optimal_ventilation_min
+                name: Optimal Ventilation
+                suffix: " min"
+          - type: entities
+            title: Bedroom & Study Quick Comparison
+            show_header_toggle: false
+            entities:
+              - entity: sensor.thermal_twin_bedroom_true_temp
+                name: Bedroom True Temp
+              - entity: climate.bedroom_radiator_valve
+                name: Bedroom Raw eTRV
+              - entity: sensor.thermal_twin_bedroom_stats
+                name: Bedroom Cooling Rate
+              - entity: sensor.thermal_twin_study_true_temp
+                name: Study True Temp
+              - entity: climate.study_radiator_valve
+                name: Study Raw eTRV
+              - entity: sensor.thermal_twin_study_stats
+                name: Study Cooling Rate
+
+  - type: sections
+    title: History & Comparison
+    path: history
+    icon: mdi:chart-line
+    max_columns: 2
+    sections:
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: 24h True Ambient vs. Raw eTRV
+            icon: mdi:chart-bell-curve
+          - type: history-graph
+            title: Living Room — True Ambient vs. Thermostat & Sensor
+            hours_to_show: 24
+            entities:
+              - entity: sensor.thermal_twin_living_room_true_temp
+                name: True Ambient
+              - entity: climate.living_room_thermostat
+                name: Raw eTRV
+              - entity: sensor.living_room_temperature
+                name: Room Sensor
+          - type: history-graph
+            title: Bedroom — True Ambient vs. eTRV & Sensor
+            hours_to_show: 24
+            entities:
+              - entity: sensor.thermal_twin_bedroom_true_temp
+                name: True Ambient
+              - entity: climate.bedroom_radiator_valve
+                name: Raw eTRV
+              - entity: sensor.bedroom_temperature
+                name: Room Sensor
+
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Study & 7-Day Thermal Trends
+            icon: mdi:chart-areaspline
+          - type: history-graph
+            title: Study — True Ambient vs. eTRV
+            hours_to_show: 24
+            entities:
+              - entity: sensor.thermal_twin_study_true_temp
+                name: True Ambient
+              - entity: climate.study_radiator_valve
+                name: Raw eTRV
+              - entity: sensor.study_temperature
+                name: Room Sensor
+          - type: statistics-graph
+            title: 7-Day Calibrated Zone Temperatures
+            chart_type: line
+            period: hour
+            days_to_show: 7
+            stat_types:
+              - mean
+              - min
+              - max
+            entities:
+              - sensor.thermal_twin_living_room_true_temp
+              - sensor.thermal_twin_bedroom_true_temp
+              - sensor.thermal_twin_study_true_temp
+
+  - type: sections
+    title: Zone Details & Psychrometrics
+    path: zones
+    icon: mdi:water-percent
+    max_columns: 3
+    sections:
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Living Room
+            icon: mdi:sofa
+          - type: entities
+            title: Thermal & Psychrometric Telemetry
+            show_header_toggle: false
+            entities:
+              - entity: sensor.thermal_twin_living_room_true_temp
+                name: True Ambient Temp
+              - entity: climate.living_room_thermostat
+                name: Climate Entity
+              - entity: binary_sensor.living_room_window_contact
+                name: Window Contact
+              - entity: sensor.thermal_twin_living_room_stats
+                name: Cooling Rate
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: k_loss
+                name: Heat Loss Coefficient (k)
+                suffix: " 1/h"
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: tau_hours
+                name: Thermal Time Constant (tau)
+                suffix: " h"
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: night_min_temp_c
+                name: Overnight Min Projection
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: absolute_humidity_g_m3
+                name: Absolute Humidity
+                suffix: " g/m³"
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: dew_point_c
+                name: Dew Point
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: optimal_ventilation_min
+                name: Optimal Ventilation
+                suffix: " min"
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: spatial_gradient_c
+                name: eTRV Spatial Gradient
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: frost_protection_active
+                name: Frost Protection Active
+              - type: attribute
+                entity: sensor.thermal_twin_living_room_stats
+                attribute: anomaly_detected
+                name: Anomaly Detected
+
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Bedroom
+            icon: mdi:bed
+          - type: entities
+            title: Thermal & Psychrometric Telemetry
+            show_header_toggle: false
+            entities:
+              - entity: sensor.thermal_twin_bedroom_true_temp
+                name: True Ambient Temp
+              - entity: climate.bedroom_radiator_valve
+                name: Climate Entity
+              - entity: binary_sensor.bedroom_window_contact
+                name: Window Contact
+              - entity: sensor.thermal_twin_bedroom_stats
+                name: Cooling Rate
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: k_loss
+                name: Heat Loss Coefficient (k)
+                suffix: " 1/h"
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: tau_hours
+                name: Thermal Time Constant (tau)
+                suffix: " h"
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: night_min_temp_c
+                name: Overnight Min Projection
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: absolute_humidity_g_m3
+                name: Absolute Humidity
+                suffix: " g/m³"
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: dew_point_c
+                name: Dew Point
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: optimal_ventilation_min
+                name: Optimal Ventilation
+                suffix: " min"
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: spatial_gradient_c
+                name: eTRV Spatial Gradient
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: frost_protection_active
+                name: Frost Protection Active
+              - type: attribute
+                entity: sensor.thermal_twin_bedroom_stats
+                attribute: anomaly_detected
+                name: Anomaly Detected
+
+      - type: grid
+        column_span: 1
+        cards:
+          - type: heading
+            heading: Study
+            icon: mdi:desk
+          - type: entities
+            title: Thermal & Psychrometric Telemetry
+            show_header_toggle: false
+            entities:
+              - entity: sensor.thermal_twin_study_true_temp
+                name: True Ambient Temp
+              - entity: climate.study_radiator_valve
+                name: Climate Entity
+              - entity: binary_sensor.study_window_contact
+                name: Window Contact
+              - entity: sensor.thermal_twin_study_stats
+                name: Cooling Rate
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: k_loss
+                name: Heat Loss Coefficient (k)
+                suffix: " 1/h"
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: tau_hours
+                name: Thermal Time Constant (tau)
+                suffix: " h"
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: night_min_temp_c
+                name: Overnight Min Projection
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: absolute_humidity_g_m3
+                name: Absolute Humidity
+                suffix: " g/m³"
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: dew_point_c
+                name: Dew Point
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: optimal_ventilation_min
+                name: Optimal Ventilation
+                suffix: " min"
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: spatial_gradient_c
+                name: eTRV Spatial Gradient
+                suffix: " °C"
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: frost_protection_active
+                name: Frost Protection Active
+              - type: attribute
+                entity: sensor.thermal_twin_study_stats
+                attribute: anomaly_detected
+                name: Anomaly Detected

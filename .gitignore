@@ -5,16 +5,21 @@
 .env.*
 !.env.example
 config/settings.yaml
+config/thermal_overrides.yaml
 config/*.local.yaml
 !config/settings.example.yaml
+!config/thermal_overrides.example.yaml
+!config/lovelace_thermal_dashboard.yaml
 
 # ---------------------------------------------------------------------------
-# Runtime data (reflection memory, logs)
+# Runtime data (reflection memory, logs, floorplan exports)
 # ---------------------------------------------------------------------------
 data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/neonplan.json
+data/*.neonplan
 *.sqlite
 *.sqlite3
 *.log

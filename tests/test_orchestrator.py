@@ -97,6 +97,8 @@ def _load_test_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AppCon
     monkeypatch.setenv("YAML_CONFIG_PATH", str(example_yaml))
     monkeypatch.setenv("MEMORY__EMBEDDING_BACKEND", "local")
     monkeypatch.setenv("HOME_ASSISTANT__MCP__ENABLED", "false")
+    monkeypatch.setenv("THERMAL__ENABLED", "false")
+    monkeypatch.setenv("AGENTS__SUB_AGENTS__THERMAL__ENABLED", "false")
     return AppConfig()  # type: ignore[call-arg]
 
 

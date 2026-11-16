@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src import __version__
 from src.agents.factory import AgentFactory
 from src.agents.supervisor import SupervisorRuntime
+from src.agents.thermal_agent import build_standalone_thermal_advisor_runner
 from src.api.routes import router as api_router
 from src.core.announcer import Announcer
 from src.core.config import AppConfig, get_config
@@ -32,6 +33,7 @@ from src.memory.base import BaseMemoryStore
 from src.memory.reflection_store import ReflectionStore, build_embedder
 from src.tools.ha_ws_adapter import HomeAssistantWSAdapter
 from src.tools.infra_mcp_server import HomelabInfraToolkit
+from src.tools.thermal_tools import ThermalTwinService
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ def create_app(
     entity_resolver: EntityResolver | None = None,
     scheduler: ActionScheduler | None = None,
     announcer: Announcer | None = None,
+    thermal_service: ThermalTwinService | None = None,
 ) -> FastAPI:
     """Application factory supporting dependency injection for tests and dry-run modes."""
     cfg = config or get_config()
@@ -103,6 +106,15 @@ def create_app(
         voice_tasks: set[asyncio.Task[Any]] = set()
 
         infra = infra_toolkit or HomelabInfraToolkit(cfg)
+        thermal: ThermalTwinService | None = None
+        if cfg.thermal.enabled:
+            thermal = thermal_service or ThermalTwinService(
+                config=cfg,
+                ha_adapter=ha,
+                entity_resolver=resolver,
+            )
+            await thermal.initialize()
+
         agent_factory = factory or AgentFactory(
             config=cfg,
             memory_store=store,
@@ -110,7 +122,15 @@ def create_app(
             infra_toolkit=infra,
             entity_resolver=resolver,
             scheduler=sched,
+            thermal_service=thermal,
         )
+        if thermal is not None:
+            if thermal.advisor_runner is None:
+                thermal.set_advisor_runner(
+                    build_standalone_thermal_advisor_runner(cfg, agent_factory, thermal)
+                )
+            await thermal.start()
+
         runtime = SupervisorRuntime(
             config=cfg,
             factory=agent_factory,
@@ -125,6 +145,7 @@ def create_app(
         app.state.announcer = ann
         app.state.voice_tasks = voice_tasks
         app.state.infra_toolkit = infra
+        app.state.thermal_service = thermal
         app.state.factory = agent_factory
         app.state.runtime = runtime
 
@@ -141,6 +162,9 @@ def create_app(
                 pending_task.cancel()
             if voice_tasks:
                 await asyncio.gather(*voice_tasks, return_exceptions=True)
+            if thermal is not None:
+                await thermal.stop()
+                await thermal.aclose()
             await sched.stop()
             await resolver.stop()
             await ha.aclose()

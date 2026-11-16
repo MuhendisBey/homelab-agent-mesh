@@ -53,6 +53,7 @@ from src.core.scheduler import ActionScheduler
 from src.memory.base import BaseMemoryStore
 from src.tools.ha_ws_adapter import HomeAssistantWSAdapter
 from src.tools.infra_mcp_server import HomelabInfraToolkit
+from src.tools.thermal_tools import ThermalTwinService
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class SubAgentBuildContext:
     model_factory: Callable[[str | None, float | None], Model]
     entity_resolver: EntityResolver | None = None
     scheduler: ActionScheduler | None = None
+    thermal_service: ThermalTwinService | None = None
 
 
 SubAgentBuilder = Callable[[SubAgentSettings, SubAgentBuildContext], AgentTool]
@@ -397,6 +399,7 @@ class AgentFactory:
         custom_model_factory: Callable[[str | None, float | None], Model] | None = None,
         entity_resolver: EntityResolver | None = None,
         scheduler: ActionScheduler | None = None,
+        thermal_service: ThermalTwinService | None = None,
     ) -> None:
         self._config = config
         self._memory_store = memory_store
@@ -404,6 +407,7 @@ class AgentFactory:
         self._infra_toolkit = infra_toolkit
         self._entity_resolver = entity_resolver
         self._scheduler = scheduler
+        self._thermal_service = thermal_service
         self._genai_client = genai_client or genai.Client(
             api_key=config.gemini_api_key.get_secret_value()
         )
@@ -443,8 +447,9 @@ class AgentFactory:
     def build_sub_agent_tools(self, emitter: EventEmitter) -> list[AgentTool]:
         """Instantiate all enabled sub-agents from `config.agents.sub_agents` via `.as_tool()`."""
         # Ensure built-in sub-agents are registered
-        import src.agents.ha_agent  # noqa: F401
+        import src.agents.ha_agent
         import src.agents.infra_agent  # noqa: F401
+        importlib.import_module("src.agents.thermal_agent")
 
         ctx = SubAgentBuildContext(
             config=self._config,
@@ -455,10 +460,13 @@ class AgentFactory:
             model_factory=self.build_model,
             entity_resolver=self._entity_resolver,
             scheduler=self._scheduler,
+            thermal_service=self._thermal_service,
         )
         tools: list[AgentTool] = []
         for key, sub_cfg in self._config.agents.sub_agents.items():
             if not sub_cfg.enabled:
+                continue
+            if key == "thermal" and not self._config.thermal.enabled:
                 continue
             builder = _SUB_AGENT_REGISTRY.get(key)
             if builder is None:

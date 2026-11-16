@@ -94,6 +94,18 @@ agents:
       model_id: null
       temperature: null
       extra_instructions: ""
+    thermal:
+      enabled: true
+      name: "ThermalSubAgent"
+      tool_name: "thermal_twin_agent"
+      description: >-
+        Specialist sub-agent for spatial thermal digital twin diagnostics, RC cooling constants,
+        ventilation shock/rebound analysis, moisture/dew-point health, overnight projections,
+        hydraulic valve balancing, and thermal advisor dashboard reporting.
+      domain: "thermal"
+      model_id: null
+      temperature: null
+      extra_instructions: ""
 
 memory:
   similarity_threshold: 0.70
@@ -190,6 +202,25 @@ voice:
   notify_title: "Kezban"
   announce_scheduled_results: true
   deferred_ack_text: "Üzerinde çalışıyorum, tamamlandığında sesli olarak bildireceğim."
+
+thermal:
+  enabled: true
+  default_ceiling_height_m: 2.60
+  radiator_proximity_threshold_m: 0.50
+  default_etrv_bias_factor: 2.5
+  ema_alpha: 0.20
+  static_calibration_idle_minutes: 60
+  dynamic_calibration_min_valve_pct: 50.0
+  tick_interval_sec: 900
+  morning_briefing_time: "07:30"
+  night_window_start_hour: 0
+  night_window_end_hour: 6
+  anomaly_valve_open_pct: 80.0
+  anomaly_min_duration_min: 45
+  outdoor_weather_entity: null
+  outdoor_temp_entity: null
+  publish_virtual_sensors: true
+  advisor_report_entity: "sensor.thermal_twin_advisor_report"
 
 plugins: []
 

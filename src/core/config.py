@@ -231,6 +231,28 @@ class VoiceSettings(_StrictModel):
     deferred_ack_text: str = "Üzerinde çalışıyorum, tamamlandığında sesli olarak bildireceğim."
 
 
+class ThermalSettings(_StrictModel):
+    """Spatial thermal digital twin & grey-box RC physics parameters."""
+
+    enabled: bool = True
+    default_ceiling_height_m: float = Field(default=2.60, gt=1.5, le=10.0)
+    radiator_proximity_threshold_m: float = Field(default=0.50, gt=0.0, le=5.0)
+    default_etrv_bias_factor: float = Field(default=2.5, ge=0.0, le=10.0)
+    ema_alpha: float = Field(default=0.20, gt=0.0, le=1.0)
+    static_calibration_idle_minutes: int = Field(default=60, ge=15)
+    dynamic_calibration_min_valve_pct: float = Field(default=50.0, gt=0.0, le=100.0)
+    tick_interval_sec: int = Field(default=900, ge=60)
+    morning_briefing_time: str = Field(default="07:30", pattern=r"^\d{2}:\d{2}$")
+    night_window_start_hour: int = Field(default=0, ge=0, le=23)
+    night_window_end_hour: int = Field(default=6, ge=0, le=23)
+    anomaly_valve_open_pct: float = Field(default=80.0, gt=0.0, le=100.0)
+    anomaly_min_duration_min: int = Field(default=45, ge=10)
+    outdoor_weather_entity: str | None = None
+    outdoor_temp_entity: str | None = None
+    publish_virtual_sensors: bool = True
+    advisor_report_entity: str = "sensor.thermal_twin_advisor_report"
+
+
 # ---------------------------------------------------------------------------
 # Root settings
 # ---------------------------------------------------------------------------
@@ -271,6 +293,8 @@ class AppConfig(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     sqlite_db_path: Path = Path("data/reflections.db")
     yaml_config_path: Path = Path("config/settings.yaml")
+    neonplan_json_path: Path = Path("data/neonplan.json")
+    thermal_overrides_path: Path = Path("config/thermal_overrides.yaml")
 
     # --- Structured configuration (settings.yaml) -------------------------------------
     llm: LLMSettings
@@ -283,6 +307,7 @@ class AppConfig(BaseSettings):
     infra: InfraSettings
     server: ServerSettings
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    thermal: ThermalSettings = Field(default_factory=ThermalSettings)
     plugins: list[str] = Field(
         default_factory=list,
         description="Extra importable modules that register sub-agents / operation resolvers (OCP).",

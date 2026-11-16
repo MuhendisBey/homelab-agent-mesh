@@ -1,0 +1,66 @@
+# ==============================================================================
+# homelab-agent-mesh - Thermal Digital Twin Physical & Entity Overrides Template
+# ==============================================================================
+# Copy to `config/thermal_overrides.yaml` (gitignored) when you need to refine
+# room geometry, insulation multipliers, or Home Assistant sensor bindings that
+# cannot be inferred automatically from your NeonPlan 3D JSON export and the HA
+# area/entity registries.
+#
+# Zero personal entity IDs, floorplan data, or private IPs are committed here.
+#
+# Zone keys under `zones:` match the canonical ASCII snake_case `zone_id`
+# generated from each room name (via `canonical_zone_id(room_name)`), or the
+# NeonPlan `room.id` / original room name.
+# ==============================================================================
+
+# Optional building-wide overrides (usually read from settings.yaml or NeonPlan):
+# weather_entity: "weather.home"
+# outdoor_temp_sensors:
+#   - "sensor.outdoor_temperature"
+# north_azimuth_deg: 0.0
+# default_ceiling_height_m: 2.60
+
+zones: {}
+
+# ------------------------------------------------------------------------------
+# Example per-zone overrides (uncomment and adapt to your zones):
+# ------------------------------------------------------------------------------
+# zones:
+#   living_room:
+#     # Override floor-level ceiling height (e.g. double-height or dropped ceiling)
+#     ceiling_height_m: 2.85
+#     # Dimensionless envelope multiplier (<1.0 better insulated, >1.0 leakier)
+#     insulation_factor: 0.95
+#     # Dominant exterior orientation / exposure tag for solar & wind context
+#     exterior_exposure: "south_west"
+#     exclude: false
+#     extra_climate_entities:
+#       - "climate.living_room_thermostat"
+#     extra_temperature_sensors:
+#       - "sensor.living_room_ambient_temperature"
+#     extra_humidity_sensors:
+#       - "sensor.living_room_humidity"
+#     extra_contact_sensors:
+#       - "binary_sensor.living_room_patio_door_contact"
+#     extra_valve_sensors:
+#       - "sensor.living_room_radiator_valve_position"
+#     max_valve_entity: "number.living_room_max_valve_position"
+#
+#   bedroom:
+#     ceiling_height_m: 2.50
+#     insulation_factor: 1.05
+#     exterior_exposure: "north"
+#     extra_temperature_sensors:
+#       - "sensor.bedroom_wall_thermometer_temperature"
+#     extra_humidity_sensors:
+#       - "sensor.bedroom_wall_thermometer_humidity"
+#     extra_contact_sensors:
+#       - "binary_sensor.bedroom_window_contact"
+#
+#   attic_storage:
+#     # Sloped roof average height & weaker roof insulation
+#     ceiling_height_m: 2.10
+#     insulation_factor: 1.35
+#     exterior_exposure: "exposed_roof"
+#     # Set exclude: true for unheated closets/sheds/gardens to omit from diagnostics
+#     exclude: true

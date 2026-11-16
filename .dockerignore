@@ -5,8 +5,11 @@
 .env.*
 !.env.example
 config/settings.yaml
+config/thermal_overrides.yaml
 config/*.local.yaml
 !config/settings.example.yaml
+!config/thermal_overrides.example.yaml
+!config/lovelace_thermal_dashboard.yaml
 data/
 logs/
 *.db
