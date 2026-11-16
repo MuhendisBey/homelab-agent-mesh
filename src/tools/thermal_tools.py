@@ -483,7 +483,13 @@ class ThermalTwinService:
             "overnight_simulation_8h": simulation,
         }
         if self._advisor_runner is not None:
-            return await self._advisor_runner(json.dumps(payload, ensure_ascii=False))
+            try:
+                return await self._advisor_runner(json.dumps(payload, ensure_ascii=False))
+            except Exception as exc:
+                logger.warning(
+                    "thermal_service | advisor_runner failed, falling back to deterministic briefing: %s",
+                    exc,
+                )
 
         summary_state, report_md = _format_deterministic_briefing(
             snapshot=snapshot,

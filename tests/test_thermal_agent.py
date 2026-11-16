@@ -451,6 +451,14 @@ async def test_thermal_service_tick_history_and_virtual_sensor_publishing(
         advisor_post = published_sensors["sensor.thermal_twin_advisor_report"]
         assert len(advisor_post["state"]) <= 245
         assert advisor_post["attributes"]["report_markdown"] == report_md
+
+        async def _failing_advisor(_: str) -> str:
+            raise RuntimeError("simulated MaxTokensReachedException")
+
+        service.set_advisor_runner(_failing_advisor)
+        fallback_md = await service.run_daily_briefing()
+        assert "Günlük Termal İkiz Özeti" in fallback_md
+        assert published_sensors["sensor.thermal_twin_advisor_report"]["attributes"]["report_markdown"] == fallback_md
     finally:
         await service.aclose()
         await http_client.aclose()

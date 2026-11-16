@@ -418,14 +418,24 @@ class AgentFactory:
         for module_path in self._config.plugins:
             importlib.import_module(module_path)
 
-    def build_model(self, model_id: str | None = None, temperature: float | None = None) -> Model:
+    def build_model(
+        self,
+        model_id: str | None = None,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> Model:
         """Create a Strands Model (or test double when injected)."""
         if self._custom_model_factory is not None:
             return self._custom_model_factory(model_id, temperature)
         resolved_model, resolved_temp = self._config.agent_model_params(model_id, temperature)
         params: dict[str, Any] = {"temperature": resolved_temp}
-        if self._config.llm.max_output_tokens is not None:
-            params["max_output_tokens"] = self._config.llm.max_output_tokens
+        effective_max_tokens = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else self._config.llm.max_output_tokens
+        )
+        if effective_max_tokens is not None:
+            params["max_output_tokens"] = effective_max_tokens
         return GeminiModel(
             client=self._genai_client,
             model_id=resolved_model,

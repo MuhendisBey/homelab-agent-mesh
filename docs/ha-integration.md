@@ -172,3 +172,21 @@ sequenceDiagram
 | **İleride `custom_components/kezban` başka bir REST API ile konuşturulabilir mi?** | **Evet.** | Adaptör yalnızca `POST /api/v1/voice` benzeri bir `{text, session_id, room}` → `{speech}` sözleşmesine bağlıdır. |
 | **Google STT/TTS yerine yerel Whisper/Piper'a geçersem ajan kodunu değiştirmem gerekir mi?** | **Hayır (Sıfır kod değişikliği).** | Ses işleme HA Assist Pipeline ayarından seçilir. Yalnızca asenkron HomePod push duyurusu için `settings.yaml` içindeki `voice.tts_entity` güncellenir. |
 | **Apple Watch üzerinde ekstra uygulama yazmam gerekir mi?** | **Hayır.** | WatchOS üzerindeki standart Home Assistant Assist aksiyonu, HA sunucusundaki `Kezban` boru hattına bağlandığında doğrudan çalışır. |
+
+---
+
+## 6. v2.0 Mekânsal Termal Dijital İkiz & Lovelace Entegrasyonu (`ThermalSubAgent`)
+
+v2.0.0 sürümüyle eklenen **Spatial Thermal Digital Twin & Grey-Box RC Estimator** katmanı, Home Assistant ile dört yönlü gevşek bağlı bir veri akışı kurar:
+
+1. **Tek Doğruluk Kaynağı (`NeonPlanAdapter` + `EntityResolver` + `thermal_overrides.yaml`):**
+   - `NEONPLAN_JSON_PATH` ile okunan NeonPlan 3D JSON dışa aktarımı; oda poligonlarından Shoelace alanı/hacmi ($m^3$), ortak duvar komşuluk grafiği (`adjacent_zones`), pencere açıklıkları (`window_area_m2` + kontak sensörleri) ve radyatör/sensör Öklid mesafelerini (`< 0.50 m` → `on_radiator`, `>= 0.50 m` → `ambient_room`) otomatik çıkarır.
+   - Opsiyonel `config/thermal_overrides.yaml` dosyası; eTRV bulunmayan pasif koridorların hesaplamadan çıkarılması (`exclude: true`) veya açık plan alanlarda (ör. salon + açık mutfak) birden fazla radyatör eTRV'sinin ilgili bölgelere ayrıştırılması (`extra_*`, `exclude_entities`, `max_valve_entity`) için kullanılır.
+2. **Öznitelik Koruyucu Geçmiş Okuma (`HAHistoryClient` → `/api/history/period`):**
+   - Home Assistant Recorder REST API'si sorguda `minimal_response` veya `no_attributes` anahtarları geçtiğinde (değeri `"false"` olsa dahi) `climate.*` ve `weather.*` özniteliklerini sildiği için, `HAHistoryClient` sorguları iki gruba böler: `climate.*`/`weather.*` grubunda bu bayrakları URL'ye hiç eklemez, yalnızca saf `sensor.*`/`binary_sensor.*` grubunda minimal yanıt kullanır.
+   - Tüm çağrılar `CircuitBreaker` koruması altındadır ve ham zaman serisi dizileri hiçbir zaman LLM'e gönderilmez; `ThermalPhysicsEngine` (`numpy`/`scipy` + `asyncio.to_thread`) yalnızca yapılandırılmış özet metrikleri (`k_loss`, $\tau$, `rebound_temp_c`, `knee_point_min`, `optimal_ventilation_min`, `max_valve_pct`) üretir.
+3. **Sanal Sensör & Danışman Raporu Yayını (`POST /api/states/sensor.thermal_twin_*`):**
+   - `ThermalTwinService` her `thermal.tick_interval_sec` (varsayılan 900 sn = 15 dk) periyodunda canlı füzyonu çalıştırıp her aktif zon için `sensor.thermal_twin_<zone>_true_temp` ve `sensor.thermal_twin_<zone>_stats` varlıklarını yayınlar.
+   - Her gün `thermal.morning_briefing_time` (varsayılan `07:30`) saatinde veya donma koruması (`target_temp <= 8.0°C`) dışındaki gerçek ısıtma anomalilerinde `ThermalSubAgent` tetiklenir; HA'nın 255 karakterlik `state` sınırını aşmamak için kısa durum özeti `state` alanına, tam Markdown rapor ise `attributes.report_markdown` alanına (`sensor.thermal_twin_advisor_report`) yazılır.
+4. **Lovelace Görselleştirme (`url_path: thermal-twin`):**
+   - `config/lovelace_thermal_dashboard.yaml` şablonu ve canlı HA üzerinde kurulu bağımsız `thermal-twin` panosu; dinamik oda seçicili `custom:thermal-twin-analytics-card` (SVG RC soğuma eğrisi, hacim/ısı kaybı/vana dağılım donut grafikleri, psikrometrik konfor matrisi), yerel `gauge`, `history-graph`, `statistics-graph` ve Markdown danışman kartlarını mevcut `dashboard-3d` panosuna dokunmadan sunar.

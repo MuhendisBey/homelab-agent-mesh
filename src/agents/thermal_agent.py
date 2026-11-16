@@ -100,9 +100,14 @@ def build_standalone_thermal_advisor_runner(
     tools: list[Any] = list(build_thermal_tools(service))
 
     async def _run_advisor(briefing_json: str) -> str:
+        advisor_max_tokens = max(config.llm.max_output_tokens or 4096, 8192)
         advisor_agent = Agent(
             name=agent_name,
-            model=factory.build_model(model_id, temperature),
+            model=factory.build_model(
+                model_id,
+                temperature,
+                max_output_tokens=advisor_max_tokens,
+            ),
             system_prompt=prompt,
             tools=tools,
             interventions=[SafetyAndApprovalGate(agent_name=agent_name, config=config)],
@@ -113,11 +118,13 @@ def build_standalone_thermal_advisor_runner(
         instruction = (
             "Aşağıdaki yapılandırılmış termal ikiz JSON verisini yorumla; gerçek ortam "
             "sıcaklıklarını, eTRV sapmalarını, soğuma sabitlerini (k_loss, tau_hours), "
-            "nem/çiy noktası/küf riskini, şok havalandırma knee_point_min bulgularını, "
-            "gece projeksiyonlarını, hidrolik denge önerilerini ve anomalileri özetleyen "
-            "net bir Türkçe Markdown raporu hazırla. Ardından mutlaka "
-            "`publish_thermal_advisor_report` aracını çağırarak Home Assistant panosunu "
-            "güncelle.\n\n"
+            "nem/çiy noktası/küf riskini, şok havalandırma bulgularını, gece "
+            "projeksiyonlarını, max vana / hidrolik denge önerilerini ve anomalileri özetleyen "
+            "KISA ve yüksek sinyalli bir Türkçe Markdown raporu hazırla (en fazla ~400 kelime, "
+            "kompakt özet tablo + kısa madde işaretleri). Ardından mutlaka "
+            "`publish_thermal_advisor_report` aracını çağırarak Home Assistant panosunu güncelle. "
+            "Araç çağrısı tamamlandıktan sonra tüm raporu cevabında tekrar etme; yalnızca tek "
+            "cümlelik kısa bir onay yaz.\n\n"
             f"{briefing_json}"
         )
         result = await advisor_agent.invoke_async(instruction)

@@ -171,6 +171,56 @@ def test_shoelace_l_polygon_area_wall_adjacency_and_overrides(tmp_path: Path) ->
     assert monitored_ids == {"living_room", "study"}
 
 
+def test_exclude_entities_override_filters_zone_bindings(tmp_path: Path) -> None:
+    """Verify exclude_entities strips unwanted shared/duplicate bindings from a zone."""
+    floorplan: dict[str, Any] = {
+        "building": {
+            "version": 1,
+            "floors": [
+                {
+                    "id": "ground",
+                    "name": "Ground",
+                    "height": 2.6,
+                    "rooms": [
+                        {
+                            "id": "room_a",
+                            "name": "Room A",
+                            "area_id": "room_a",
+                            "points": [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]],
+                            "climate": {
+                                "entity_id": "climate.room_a_trv",
+                                "temperature": "sensor.shared_temp",
+                                "humidity": "sensor.shared_hum",
+                                "valve": "sensor.stale_valve",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    plan_path = tmp_path / "floorplan.json"
+    plan_path.write_text(json.dumps(floorplan), encoding="utf-8")
+
+    overrides_path = tmp_path / "thermal_overrides.yaml"
+    overrides_path.write_text(
+        """zones:
+  room_a:
+    exclude_entities:
+      - "sensor.stale_valve"
+      - "sensor.shared_temp"
+""",
+        encoding="utf-8",
+    )
+
+    topology = NeonPlanAdapter().load(plan_path, overrides_path=overrides_path)
+    room = topology.zones["room_a"]
+    assert "sensor.stale_valve" not in room.valve_position_sensors
+    assert all(s.entity_id != "sensor.shared_temp" for s in room.temperature_sensors)
+    assert "climate.room_a_trv" in room.climate_entities
+    assert "sensor.shared_hum" in room.humidity_sensors
+
+
 def test_entity_binding_spatial_classification_and_registry_tie_breaking(tmp_path: Path) -> None:
     """Verify furniture/openings/placements binding, <0.5m vs >=0.5m classification, and area tie-break."""
     floorplan: dict[str, Any] = {

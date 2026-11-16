@@ -56,6 +56,7 @@ class ZoneLiveTelemetry(BaseModel):
     hvac_action: str | None = None
     bosch_state: str | None = None
     valve_position_pct: float | None = None
+    max_valve_pct: float | None = None
     valve_estimated: bool = False
     raw_etrv_temp_c: float | None = None
     etrv_corrected_temp_c: float | None = None
@@ -711,6 +712,14 @@ class ThermalPhysicsEngine:
                 valve_estimated = True
                 valve_pct = 0.0
 
+            max_valve_pct: float | None = None
+            if zone.max_valve_entity:
+                mv_state = state_map.get(zone.max_valve_entity)
+                if mv_state is not None:
+                    mv_num = _parse_float(mv_state.get("state"))
+                    if mv_num is not None and 0.0 <= mv_num <= 100.0:
+                        max_valve_pct = round(mv_num, 1)
+
             etrv_corrected_temp_c: float | None = None
             if raw_etrv_temp_c is not None:
                 eff_valve = valve_pct if valve_pct is not None else 0.0
@@ -817,6 +826,7 @@ class ThermalPhysicsEngine:
                 hvac_action=hvac_action,
                 bosch_state=bosch_state,
                 valve_position_pct=valve_pct,
+                max_valve_pct=max_valve_pct,
                 valve_estimated=valve_estimated,
                 raw_etrv_temp_c=raw_etrv_temp_c,
                 etrv_corrected_temp_c=etrv_corrected_temp_c,

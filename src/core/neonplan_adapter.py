@@ -257,6 +257,7 @@ class ZoneOverride(BaseModel):
     extra_humidity_sensors: list[str] = Field(default_factory=list)
     extra_contact_sensors: list[str] = Field(default_factory=list)
     extra_valve_sensors: list[str] = Field(default_factory=list)
+    exclude_entities: list[str] = Field(default_factory=list)
     max_valve_entity: str | None = None
 
 
@@ -1383,6 +1384,17 @@ class NeonPlanAdapter:
                     zone.temperature_sensors.append(
                         SensorPlacement(entity_id=eid, sensor_type="temperature", source="override")
                     )
+            if ov.exclude_entities:
+                excluded_set = set(ov.exclude_entities)
+                zone.climate_entities = [e for e in zone.climate_entities if e not in excluded_set]
+                zone.temperature_sensors = [
+                    s for s in zone.temperature_sensors if s.entity_id not in excluded_set
+                ]
+                zone.humidity_sensors = [e for e in zone.humidity_sensors if e not in excluded_set]
+                zone.valve_position_sensors = [
+                    e for e in zone.valve_position_sensors if e not in excluded_set
+                ]
+                zone.contact_sensors = [e for e in zone.contact_sensors if e not in excluded_set]
 
     def _finalize_zone_sensors(
         self,

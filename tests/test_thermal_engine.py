@@ -232,6 +232,7 @@ async def test_live_sensor_fusion_radiation_bias_and_humidity_sentinel_fallback(
             "attributes": {"current_temperature": 22.0, "temperature": 21.0, "hvac_action": "heating"},
         },
         {"entity_id": "sensor.living_room_valve", "state": "60.0", "attributes": {}},
+        {"entity_id": "number.living_room_max_valve", "state": "85.0", "attributes": {}},
         {"entity_id": "sensor.living_room_ambient_temp", "state": "20.0", "attributes": {}},
         {"entity_id": "sensor.living_room_humidity", "state": "50.0", "attributes": {}},
         {"entity_id": "binary_sensor.living_room_window", "state": "off", "attributes": {}},
@@ -270,6 +271,7 @@ async def test_live_sensor_fusion_radiation_bias_and_humidity_sentinel_fallback(
     assert liv.spatial_gradient_c == pytest.approx(2.0)
     assert liv.dew_point_c == pytest.approx(9.27, abs=0.05)
     assert liv.absolute_humidity_g_m3 == pytest.approx(8.65, abs=0.05)
+    assert liv.max_valve_pct == pytest.approx(85.0)
     assert liv.anomaly_detected is False
 
     bed = snap.zones["bedroom"]

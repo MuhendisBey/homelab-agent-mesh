@@ -44,6 +44,8 @@ zones: {}
 #       - "binary_sensor.living_room_patio_door_contact"
 #     extra_valve_sensors:
 #       - "sensor.living_room_radiator_valve_position"
+#     exclude_entities:
+#       - "sensor.adjacent_zone_shared_valve_position"
 #     max_valve_entity: "number.living_room_max_valve_position"
 #
 #   bedroom:
