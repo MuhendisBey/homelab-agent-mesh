@@ -12,6 +12,7 @@ Handles:
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -29,6 +30,42 @@ logger = logging.getLogger(__name__)
 _MAX_HA_STATE_LEN = 245
 _MAX_ADVISOR_STATE_LEN = 240
 _MINIMAL_HISTORY_DOMAINS = ("sensor.", "binary_sensor.")
+
+_LATEX_INLINE_RE = re.compile(r"\$\$?([^$\n]+?)\$\$?")
+_LATEX_TEXT_RE = re.compile(r"\\text\{([^{}]*)\}")
+_LATEX_SUB_RE = re.compile(r"_\{([^{}]*)\}")
+_LATEX_CMD_MAP: dict[str, str] = {
+    r"\tau": "tau",
+    r"\geq": "≥",
+    r"\ge": "≥",
+    r"\leq": "≤",
+    r"\le": "≤",
+    r"\approx": "≈",
+    r"\times": "×",
+    r"\pm": "±",
+    r"\degree": "°",
+}
+_LATEX_CMD_RE = re.compile(
+    r"(\\(?:tau|geq|ge|leq|le|approx|times|pm|degree))(?![A-Za-z])"
+)
+
+
+def _strip_latex_for_ha(text: str) -> str:
+    """Convert raw LaTeX math fragments to readable plain text for Home Assistant Markdown."""
+    if not text:
+        return text
+
+    def _clean_expr(expr: str) -> str:
+        s = _LATEX_TEXT_RE.sub(r"\1", expr)
+        s = _LATEX_SUB_RE.sub(r"_\1", s)
+        s = _LATEX_CMD_RE.sub(lambda m: _LATEX_CMD_MAP.get(m.group(1), m.group(1)), s)
+        return s
+
+    cleaned = _LATEX_INLINE_RE.sub(lambda m: _clean_expr(m.group(1)), text)
+    # Also clean any stray unenclosed LaTeX commands if the model emitted them outside $...$
+    if "\\" in cleaned or "_{" in cleaned:
+        cleaned = _clean_expr(cleaned)
+    return cleaned
 
 
 def _to_utc(dt: datetime) -> datetime:
@@ -363,10 +400,12 @@ class HAHistoryClient:
         extra_attributes: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Publish the thermal twin Markdown advisor report sensor to Home Assistant."""
+        clean_summary = _strip_latex_for_ha(summary_state)
+        clean_markdown = _strip_latex_for_ha(report_markdown)
         attributes: dict[str, Any] = {
             "friendly_name": "Termal İkiz Danışman Raporu",
             "icon": "mdi:home-thermometer-outline",
-            "report_markdown": report_markdown,
+            "report_markdown": clean_markdown,
             "updated_at_utc": datetime.now(UTC).isoformat(),
         }
         if extra_attributes:
@@ -374,6 +413,6 @@ class HAHistoryClient:
 
         return await self.publish_virtual_sensor(
             entity_id=self._config.thermal.advisor_report_entity,
-            state=summary_state[:_MAX_ADVISOR_STATE_LEN],
+            state=clean_summary[:_MAX_ADVISOR_STATE_LEN],
             attributes=attributes,
         )

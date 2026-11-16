@@ -48,7 +48,9 @@ You are the Spatial Thermal Digital Twin Specialist Sub-Agent in a hierarchical 
      - **Radiator eTRV Bias**: contrast `raw_etrv_temp_c` vs. `true_ambient_temp_c` (plus
        `spatial_gradient_c`, `valve_position_pct`, `etrv_bias_factor`, `static_offset_c`).
      - **Envelope RC Constants**: interpret `k_loss` (1/h) and `tau_hours` (thermal time constant)
-       from nighttime cooling curves.
+       from nighttime cooling curves using plain Turkish labels such as
+       `Isı Kaybı (k_loss)` and `Termal Direnç (tau)`. NEVER use LaTeX math (`$...$`, `\tau`,
+       `\text{...}`, `_{...}`) because Home Assistant Markdown cards render LaTeX as raw code.
      - **Moisture & Dew-Point Health**: explain `rel_humidity_pct`, `absolute_humidity_g_m3`,
        `dew_point_c`, `enthalpy_kj_kg`, and `mold_risk` (`low`/`moderate`/`high`).
      - **Shock Ventilation & Rebound**: cite `optimal_ventilation_min`, observed `knee_point_min`,
@@ -59,7 +61,7 @@ You are the Spatial Thermal Digital Twin Specialist Sub-Agent in a hierarchical 
 4. **Home Assistant Dashboard Publishing**:
    - When asked to generate a morning briefing, anomaly alert, or dashboard report, ALWAYS call
      `publish_thermal_advisor_report(summary_state=..., report_markdown=...)` with a concise
-     status string and a well-structured Markdown report.
+     status string and a well-structured plain Markdown report (ZERO LaTeX `$...$` syntax).
 """.strip()
 
 
@@ -117,14 +119,16 @@ def build_standalone_thermal_advisor_runner(
         )
         instruction = (
             "Aşağıdaki yapılandırılmış termal ikiz JSON verisini yorumla; gerçek ortam "
-            "sıcaklıklarını, eTRV sapmalarını, soğuma sabitlerini (k_loss, tau_hours), "
+            "sıcaklıklarını, eTRV sapmalarını, soğuma sabitlerini "
+            "(düz metin olarak `Isı Kaybı (k_loss)` ve `Termal Direnç (tau)` şeklinde), "
             "nem/çiy noktası/küf riskini, şok havalandırma bulgularını, gece "
             "projeksiyonlarını, max vana / hidrolik denge önerilerini ve anomalileri özetleyen "
             "KISA ve yüksek sinyalli bir Türkçe Markdown raporu hazırla (en fazla ~400 kelime, "
-            "kompakt özet tablo + kısa madde işaretleri). Ardından mutlaka "
-            "`publish_thermal_advisor_report` aracını çağırarak Home Assistant panosunu güncelle. "
-            "Araç çağrısı tamamlandıktan sonra tüm raporu cevabında tekrar etme; yalnızca tek "
-            "cümlelik kısa bir onay yaz.\n\n"
+            "kompakt özet tablo + kısa madde işaretleri). Home Assistant LaTeX desteklemediği "
+            "için ASLA `$...$`, `\\tau`, `_{...}` veya `\\text{...}` formül kodu kullanma. "
+            "Ardından mutlaka `publish_thermal_advisor_report` aracını çağırarak Home Assistant "
+            "panosunu güncelle. Araç çağrısı tamamlandıktan sonra tüm raporu cevabında tekrar "
+            "etme; yalnızca tek cümlelik kısa bir onay yaz.\n\n"
             f"{briefing_json}"
         )
         result = await advisor_agent.invoke_async(instruction)

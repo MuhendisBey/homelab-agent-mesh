@@ -304,6 +304,22 @@ async def test_ha_history_client_query_splitting_circuit_breaker_and_virtual_sen
         assert posted_report is not None
         assert len(posted_report["state"]) <= 245
         assert posted_report["attributes"]["report_markdown"] == full_md
+
+        # LaTeX fragments in advisor reports are sanitized for HA Markdown cards
+        raw_latex_md = (
+            "Zarf ($k_{loss}=0.08$, $\\tau=12.5\\text{ h}$, $\\tau \\ge 600\\text{ h}$) "
+            "ve kalan fiyat $20."
+        )
+        await client.publish_advisor_report(
+            summary_state="Durum ($k_{loss}=0.08$)",
+            report_markdown=raw_latex_md,
+        )
+        sanitized = recorded_requests[-1][3]
+        assert sanitized is not None
+        assert sanitized["state"] == "Durum (k_loss=0.08)"
+        assert sanitized["attributes"]["report_markdown"] == (
+            "Zarf (k_loss=0.08, tau=12.5 h, tau ≥ 600 h) ve kalan fiyat $20."
+        )
     finally:
         await http_client.aclose()
 
