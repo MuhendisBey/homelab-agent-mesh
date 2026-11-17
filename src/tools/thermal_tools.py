@@ -521,11 +521,14 @@ class ThermalTwinService:
         return True
 
     async def _run_loop(self) -> None:
+        first_tick = True
         while self._running:
+            wait_sec = 2.0 if first_tick else float(self._thermal_cfg.tick_interval_sec)
+            first_tick = False
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
-                    timeout=float(self._thermal_cfg.tick_interval_sec),
+                    timeout=wait_sec,
                 )
                 break
             except TimeoutError:
