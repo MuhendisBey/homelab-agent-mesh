@@ -147,7 +147,7 @@ homelab-agent-mesh/
 │   ├── test_thermal_engine.py       # Psikrometri, RC soğuma fit, şok/rebound ve simülasyon testleri
 │   └── test_thermal_agent.py        # HAHistoryClient, ThermalTwinService ve ThermalSubAgent testleri
 └── src/
-    ├── __init__.py                  # Paket versiyonu (2.0.0)
+    ├── __init__.py                  # Paket versiyonu (2.0.1)
     ├── main.py                      # FastAPI başlatıcı, lifecycle yöneticisi ve CLI
     ├── core/
     │   ├── announcer.py             # P4: HomePod AirPlay TTS Announcer & uyanma eki temizleyici
