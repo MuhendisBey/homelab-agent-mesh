@@ -25,7 +25,7 @@ from strands import tool
 from strands.types.tools import AgentTool
 from websockets.asyncio.client import ClientConnection
 
-from src.core.config import AppConfig
+from src.core.config import AppConfig, DomainAssertionPolicy
 from src.core.exceptions import (
     HomeAssistantAuthError,
     HomeAssistantError,
@@ -373,14 +373,26 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
     # Tool 3: Deterministic post-execution state assertion
     # ------------------------------------------------------------------
 
+    def _resolve_assertion_policy(self, canonical_entity_id: str) -> DomainAssertionPolicy | None:
+        domain = canonical_entity_id.split(".", 1)[0].strip().lower()
+        if not domain:
+            return None
+        return self._ha_cfg.domain_assert_policies.get(domain)
+
     def _matches(
         self,
         snapshot: EntityState,
         expected_state: str | None,
         expected_attributes: Mapping[str, Any],
+        policy: DomainAssertionPolicy | None = None,
     ) -> tuple[bool, str | None]:
         if expected_state is not None:
-            if not self._value_matches(snapshot.state, expected_state):
+            state_matched = self._value_matches(snapshot.state, expected_state)
+            if not state_matched and policy is not None:
+                exp_key = expected_state.strip().lower()
+                allowed = {s.strip().lower() for s in policy.transitional_states.get(exp_key, ())}
+                state_matched = snapshot.state.strip().lower() in allowed
+            if not state_matched:
                 return (
                     False,
                     f"State mismatch for '{snapshot.entity_id}': expected '{expected_state}', "
@@ -426,8 +438,25 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
     ) -> StateAssertionResult:
         """Verify physical/system execution via polling + WebSocket state_changed subscription."""
         canonical = self.resolve_entity_id(entity_id)
-        eff_timeout = timeout_sec if timeout_sec is not None else self._ha_cfg.default_assert_timeout_sec
-        eff_poll_ms = poll_interval_ms if poll_interval_ms is not None else self._ha_cfg.default_poll_interval_ms
+        policy = self._resolve_assertion_policy(canonical)
+        eff_timeout = (
+            timeout_sec
+            if timeout_sec is not None
+            else (
+                policy.timeout_sec
+                if policy is not None and policy.timeout_sec is not None
+                else self._ha_cfg.default_assert_timeout_sec
+            )
+        )
+        eff_poll_ms = (
+            poll_interval_ms
+            if poll_interval_ms is not None
+            else (
+                policy.poll_interval_ms
+                if policy is not None and policy.poll_interval_ms is not None
+                else self._ha_cfg.default_poll_interval_ms
+            )
+        )
         exp_attrs = dict(expected_attributes or {})
 
         self._guards.validate_timeout(eff_timeout)
@@ -444,7 +473,7 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
                 entity_id=canonical,
             )
         last_snapshot = initial
-        matched, last_reason = self._matches(initial, expected_state, exp_attrs)
+        matched, last_reason = self._matches(initial, expected_state, exp_attrs, policy=policy)
         if matched:
             await self._record_verified_learning(canonical)
             return StateAssertionSuccess(
@@ -466,7 +495,7 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
             if current is None:
                 continue
             last_snapshot = current
-            matched, last_reason = self._matches(current, expected_state, exp_attrs)
+            matched, last_reason = self._matches(current, expected_state, exp_attrs, policy=policy)
             if matched:
                 await self._record_verified_learning(canonical)
                 return StateAssertionSuccess(
@@ -600,8 +629,9 @@ class HomeAssistantWSAdapter(BaseStateVerifier):
             name="assert_entity_state",
             description=(
                 "Deterministic Actor-Critic state verifier: polls Home Assistant until the entity "
-                "reaches expected_state (and optional expected_attributes) or timeout_sec expires. "
-                "Returns StateAssertionSuccess or StateAssertionFailure."
+                "reaches expected_state (or a configured domain transitional state such as "
+                "'closing'/'opening' for slow covers) and optional expected_attributes, or "
+                "timeout_sec expires. Returns StateAssertionSuccess or StateAssertionFailure."
             ),
         )
         async def assert_entity_state(

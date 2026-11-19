@@ -189,6 +189,9 @@ class EntityResolver:
         confidence_threshold: float = 0.85,
         reconcile_interval_sec: float = 21600.0,
         enable_ws_listener: bool = True,
+        normal_debounce_sec: float = 1.5,
+        boot_debounce_sec: float = 10.0,
+        ws_boot_settle_sec: float = 60.0,
     ) -> None:
         self._config = config
         self._db_path = Path(db_path)
@@ -200,6 +203,10 @@ class EntityResolver:
         self._confidence_threshold = confidence_threshold
         self._reconcile_interval_sec = reconcile_interval_sec
         self._enable_ws_listener = enable_ws_listener
+        self._normal_debounce_sec = max(0.1, normal_debounce_sec)
+        self._boot_debounce_sec = max(self._normal_debounce_sec, boot_debounce_sec)
+        self._ws_boot_settle_sec = max(0.0, ws_boot_settle_sec)
+        self._ws_reconnect_settle_until: float = 0.0
 
         self._write_lock = asyncio.Lock()
         self._refresh_lock = asyncio.Lock()
@@ -323,9 +330,10 @@ class EntityResolver:
 
         self._running = True
         if self._ha is not None:
-            self._tasks.append(asyncio.create_task(self._initial_sync_safe(), name="er_initial_sync"))
             if self._enable_ws_listener:
                 self._tasks.append(asyncio.create_task(self._ws_event_loop(), name="er_ws_listener"))
+            else:
+                self._tasks.append(asyncio.create_task(self._initial_sync_safe(), name="er_initial_sync"))
             if self._reconcile_interval_sec > 0:
                 self._tasks.append(asyncio.create_task(self._reconcile_loop(), name="er_reconcile"))
 
@@ -385,6 +393,7 @@ class EntityResolver:
                         )
                         sub_ids[idx] = evt
                     logger.info("entity_resolver | subscribed to HA WS registry events: %s", list(_REGISTRY_EVENTS))
+                    self._ws_reconnect_settle_until = time.monotonic() + self._ws_boot_settle_sec
                     await self.refresh()
 
                     next_ping_id = len(_REGISTRY_EVENTS) + 1
@@ -416,15 +425,23 @@ class EntityResolver:
                 await asyncio.sleep(backoff)
                 backoff = min(60.0, backoff * 2.0)
 
-    def _schedule_debounced_refresh(self, delay_sec: float = 1.5) -> None:
+    def _effective_debounce_delay(self, explicit_delay_sec: float | None = None) -> float:
+        if explicit_delay_sec is not None:
+            return explicit_delay_sec
+        if time.monotonic() < self._ws_reconnect_settle_until:
+            return self._boot_debounce_sec
+        return self._normal_debounce_sec
+
+    def _schedule_debounced_refresh(self, delay_sec: float | None = None) -> None:
         if not self._running or self._ha is None:
             return
+        eff_delay = self._effective_debounce_delay(delay_sec)
         if self._debounce_task is not None and not self._debounce_task.done():
             self._debounce_task.cancel()
 
         async def _runner() -> None:
             try:
-                await asyncio.sleep(delay_sec)
+                await asyncio.sleep(eff_delay)
                 await self.refresh()
             except asyncio.CancelledError:
                 return

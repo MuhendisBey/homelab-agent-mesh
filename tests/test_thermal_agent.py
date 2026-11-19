@@ -735,3 +735,147 @@ def test_thermal_subagent_supervisor_and_fastapi_integration(
     assert "last_changed" not in serialized_llm_inputs
     assert "ventilation_events" in serialized_llm_inputs
     assert "rebound_temp_c" in serialized_llm_inputs
+
+
+@pytest.mark.asyncio
+async def test_thermal_timezone_daily_briefing_and_advisor_restart_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import ThermalSettings
+    from src.core.thermal_engine import _in_night_window
+
+    # 1. ThermalSettings backward-compatible alias & AppConfig IANA timezone validation
+    t_legacy = ThermalSettings.model_validate({"morning_briefing_time": "08:15"})
+    assert t_legacy.daily_briefing_time == "08:15"
+    assert t_legacy.morning_briefing_time == "08:15"
+
+    t_new = ThermalSettings(daily_briefing_time="20:00")
+    assert t_new.daily_briefing_time == "20:00"
+    assert t_new.morning_briefing_time == "20:00"
+
+    monkeypatch.setenv("TIMEZONE", "Europe/Amsterdam")
+    cfg = _load_thermal_config(tmp_path, monkeypatch)
+    assert cfg.timezone == "Europe/Amsterdam"
+    assert cfg.tzinfo == ZoneInfo("Europe/Amsterdam")
+
+    monkeypatch.setenv("TIMEZONE", "Invalid/Nowhere")
+    with pytest.raises(ValueError):
+        _load_thermal_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("TIMEZONE", "Europe/Amsterdam")
+
+    # 2. _in_night_window evaluates local timezone hours (23:30 UTC == 00:30 CET)
+    ts_utc = datetime(2026, 11, 19, 23, 30, tzinfo=UTC)
+    assert _in_night_window(ts_utc, 0, 6, tz=UTC) is False
+    assert _in_night_window(ts_utc, 0, 6, tz=ZoneInfo("Europe/Amsterdam")) is True
+
+    # 3. Daily briefing at 20:00 Europe/Amsterdam (19:00 UTC in winter), persistence across restarts,
+    #    and automatic advisor_report republish after HA restart clears virtual sensors
+    plan_path = _write_synthetic_floorplan(tmp_path / "neonplan.json")
+    cfg = _load_thermal_config(tmp_path, monkeypatch, plan_path=plan_path)
+    assert cfg.thermal.daily_briefing_time == "20:00"
+
+    include_advisor_in_states = False
+    published_advisor_calls: list[dict[str, Any]] = []
+    t_base = datetime(2026, 11, 19, 10, 0, tzinfo=UTC)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal include_advisor_in_states
+        if request.method == "GET" and request.url.path == "/api/states":
+            states: list[dict[str, Any]] = [
+                {"entity_id": "sensor.outdoor_temperature", "state": "4.0", "attributes": {}},
+                {"entity_id": "sensor.bedroom_ambient_temp", "state": "19.5", "attributes": {}},
+                {"entity_id": "sensor.bedroom_humidity", "state": "55.0", "attributes": {}},
+                {
+                    "entity_id": "climate.bedroom_trv",
+                    "state": "heat",
+                    "attributes": {"current_temperature": 20.5, "temperature": 20.0, "hvac_action": "idle"},
+                },
+                {"entity_id": "sensor.bedroom_valve", "state": "0.0", "attributes": {}},
+                {"entity_id": "binary_sensor.bedroom_window", "state": "off", "attributes": {}},
+            ]
+            if include_advisor_in_states:
+                states.append(
+                    {
+                        "entity_id": "sensor.thermal_twin_advisor_report",
+                        "state": "Normal (2 zon izleniyor)",
+                        "attributes": {},
+                    }
+                )
+            return httpx.Response(200, json=states)
+        if request.method == "GET" and request.url.path.startswith("/api/history/period/"):
+            filter_ids = request.url.params.get("filter_entity_id", "").split(",")
+            payload = [
+                [{"entity_id": eid, "state": "19.5", "last_updated": t_base.isoformat()}]
+                for eid in filter_ids
+                if eid
+            ]
+            return httpx.Response(200, json=payload)
+        if request.method == "POST" and request.url.path.startswith("/api/states/"):
+            eid = request.url.path.removeprefix("/api/states/")
+            body = json.loads(request.content.decode("utf-8"))
+            if eid == "sensor.thermal_twin_advisor_report":
+                published_advisor_calls.append(body)
+            return httpx.Response(200, json={"entity_id": eid, **body})
+        return httpx.Response(404)
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://192.0.2.10:8123")
+    history_client = HAHistoryClient(config=cfg, http_client=http_client)
+    resolver = EntityResolver(
+        config=cfg,
+        db_path=cfg.sqlite_db_path,
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        enable_ws_listener=False,
+    )
+    service = ThermalTwinService(
+        config=cfg,
+        entity_resolver=resolver,
+        history_client=history_client,
+    )
+    try:
+        await service.initialize()
+        # 18:59 UTC == 19:59 CET -> must NOT trigger 20:00 briefing
+        assert await service._maybe_run_daily_briefing(datetime(2026, 11, 19, 18, 59, tzinfo=UTC)) is False
+        assert len(published_advisor_calls) == 0
+
+        # 19:00 UTC == 20:00 CET -> triggers daily briefing and persists to SQLite
+        assert await service._maybe_run_daily_briefing(datetime(2026, 11, 19, 19, 0, tzinfo=UTC)) is True
+        assert len(published_advisor_calls) == 1
+
+        # Second check on same day -> skipped
+        assert await service._maybe_run_daily_briefing(datetime(2026, 11, 19, 19, 15, tzinfo=UTC)) is False
+        assert len(published_advisor_calls) == 1
+    finally:
+        await service.aclose()
+
+    # Restart simulation: new ThermalTwinService shares the same SQLite DB
+    history_client_2 = HAHistoryClient(config=cfg, http_client=http_client)
+    service_2 = ThermalTwinService(
+        config=cfg,
+        entity_resolver=resolver,
+        history_client=history_client_2,
+    )
+    try:
+        await service_2.initialize()
+        # Restored _last_briefing_date prevents duplicate briefing on container restart
+        assert await service_2._maybe_run_daily_briefing(datetime(2026, 11, 19, 19, 30, tzinfo=UTC)) is False
+        assert len(published_advisor_calls) == 1
+
+        # HA restart simulation: advisor_report is absent from raw_states -> auto-republished!
+        include_advisor_in_states = False
+        await service_2.run_live_tick(publish=True, trigger_advisor=False)
+        assert len(published_advisor_calls) == 2
+        repub_attrs = published_advisor_calls[-1]["attributes"]
+        assert repub_attrs["republished_after_ha_restart"] is True
+        assert "original_updated_at_utc" in repub_attrs
+
+        # Once present in HA raw_states, subsequent live ticks must NOT needlessly republish
+        include_advisor_in_states = True
+        await service_2.run_live_tick(publish=True, trigger_advisor=False)
+        assert len(published_advisor_calls) == 2
+    finally:
+        await service_2.aclose()
+        await http_client.aclose()
+

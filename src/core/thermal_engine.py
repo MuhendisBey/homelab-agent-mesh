@@ -10,7 +10,7 @@ import warnings
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any, Literal
 
 import numpy as np
@@ -369,9 +369,10 @@ def _lookup_step(points: Sequence[_HistoryPoint], target: datetime) -> _HistoryP
     return points[idx - 1]
 
 
-def _in_night_window(dt: datetime, start_hour: int, end_hour: int) -> bool:
-    hour = dt.hour
-    minute = dt.minute
+def _in_night_window(dt: datetime, start_hour: int, end_hour: int, tz: tzinfo = UTC) -> bool:
+    local_dt = dt.astimezone(tz) if dt.tzinfo is not None else dt.replace(tzinfo=tz)
+    hour = local_dt.hour
+    minute = local_dt.minute
     if start_hour <= end_hour:
         return (start_hour <= hour < end_hour) or (hour == end_hour and minute == 0)
     return (hour >= start_hour) or (hour < end_hour) or (hour == end_hour and minute == 0)
@@ -446,10 +447,12 @@ class ThermalPhysicsEngine:
         topology: BuildingTopology,
         store: ThermalStore,
         settings: ThermalSettings,
+        tz: tzinfo = UTC,
     ) -> None:
         self._topology = topology
         self._store = store
         self._settings = settings
+        self._tz = tz
 
     @property
     def topology(self) -> BuildingTopology:
@@ -1246,7 +1249,10 @@ class ThermalPhysicsEngine:
             for ts, temp_c in primary_temp_series:
                 valve_pct, hvac_action, _, win_open = self._state_at(ts, zone, zdata, parsed_by_entity)
                 is_night = _in_night_window(
-                    ts, self._settings.night_window_start_hour, self._settings.night_window_end_hour
+                    ts,
+                    self._settings.night_window_start_hour,
+                    self._settings.night_window_end_hour,
+                    tz=self._tz,
                 )
                 heating_off = (valve_pct is None or valve_pct <= 1.0) and hvac_action != "heating"
                 if is_night and heating_off and not win_open:

@@ -16,8 +16,17 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -167,6 +176,14 @@ class HAMCPSettings(_StrictModel):
     tool_denylist: list[str] = Field(default_factory=list)
 
 
+class DomainAssertionPolicy(_StrictModel):
+    """Per-domain state assertion timeout, polling interval, and valid transitional states."""
+
+    timeout_sec: float | None = Field(default=None, gt=0)
+    poll_interval_ms: int | None = Field(default=None, gt=0)
+    transitional_states: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class HomeAssistantSettings(_StrictModel):
     """Home Assistant adapter parameters & topology."""
 
@@ -181,6 +198,7 @@ class HomeAssistantSettings(_StrictModel):
         default_factory=list,
         description="Tool names (native or ha-mcp) that change physical state and require verification.",
     )
+    domain_assert_policies: dict[str, DomainAssertionPolicy] = Field(default_factory=dict)
     entity_aliases: dict[str, str] = Field(default_factory=dict)
     mcp: HAMCPSettings
 
@@ -234,6 +252,8 @@ class VoiceSettings(_StrictModel):
 class ThermalSettings(_StrictModel):
     """Spatial thermal digital twin & grey-box RC physics parameters."""
 
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
     enabled: bool = True
     default_ceiling_height_m: float = Field(default=2.60, gt=1.5, le=10.0)
     radiator_proximity_threshold_m: float = Field(default=0.50, gt=0.0, le=5.0)
@@ -242,7 +262,11 @@ class ThermalSettings(_StrictModel):
     static_calibration_idle_minutes: int = Field(default=60, ge=15)
     dynamic_calibration_min_valve_pct: float = Field(default=50.0, gt=0.0, le=100.0)
     tick_interval_sec: int = Field(default=900, ge=60)
-    morning_briefing_time: str = Field(default="07:30", pattern=r"^\d{2}:\d{2}$")
+    daily_briefing_time: str = Field(
+        default="20:00",
+        pattern=r"^\d{2}:\d{2}$",
+        validation_alias=AliasChoices("daily_briefing_time", "morning_briefing_time"),
+    )
     night_window_start_hour: int = Field(default=0, ge=0, le=23)
     night_window_end_hour: int = Field(default=6, ge=0, le=23)
     anomaly_valve_open_pct: float = Field(default=80.0, gt=0.0, le=100.0)
@@ -251,6 +275,11 @@ class ThermalSettings(_StrictModel):
     outdoor_temp_entity: str | None = None
     publish_virtual_sensors: bool = True
     advisor_report_entity: str = "sensor.thermal_twin_advisor_report"
+
+    @property
+    def morning_briefing_time(self) -> str:
+        """Backward-compatible alias for ``daily_briefing_time``."""
+        return self.daily_briefing_time
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +326,10 @@ class AppConfig(BaseSettings):
     thermal_overrides_path: Path = Path("config/thermal_overrides.yaml")
 
     # --- Structured configuration (settings.yaml) -------------------------------------
+    timezone: str = Field(
+        default="UTC",
+        description="IANA timezone identifier (e.g. 'Europe/Amsterdam').",
+    )
     llm: LLMSettings
     safety: SafetyBounds
     circuit_breaker: CircuitBreakerSettings
@@ -317,6 +350,23 @@ class AppConfig(BaseSettings):
     @classmethod
     def _strip_trailing_slash(cls, value: str | None) -> str | None:
         return value.rstrip("/") if value else value
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("timezone must not be empty")
+        try:
+            ZoneInfo(cleaned)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown IANA timezone: '{cleaned}'") from exc
+        return cleaned
+
+    @property
+    def tzinfo(self) -> ZoneInfo:
+        """Return the configured ``ZoneInfo`` instance."""
+        return ZoneInfo(self.timezone)
 
     @property
     def proxmox_enabled(self) -> bool:

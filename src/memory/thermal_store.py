@@ -46,6 +46,17 @@ class ThermalObservationRecord(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ThermalAdvisorReportRecord(BaseModel):
+    """Persisted latest thermal advisor report for HA restart self-healing."""
+
+    report_key: str = "latest"
+    summary_state: str
+    report_markdown: str
+    extra_attributes: dict[str, Any] = Field(default_factory=dict)
+    report_type: str = "daily_briefing"
+    updated_at: str = Field(default_factory=_utc_now_iso)
+
+
 class ThermalStore:
     """Async-safe SQLite WAL store for thermal zone parameters and observations."""
 
@@ -101,6 +112,18 @@ class ThermalStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_thermal_observations_zone_type
                 ON thermal_observations (zone_id, event_type, started_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thermal_advisor_reports (
+                    report_key TEXT PRIMARY KEY,
+                    summary_state TEXT NOT NULL,
+                    report_markdown TEXT NOT NULL,
+                    extra_attributes_json TEXT NOT NULL DEFAULT '{}',
+                    report_type TEXT NOT NULL DEFAULT 'daily_briefing',
+                    updated_at TEXT NOT NULL
+                )
                 """
             )
         self._initialized = True
@@ -334,3 +357,82 @@ class ThermalStore:
     ) -> list[ThermalObservationRecord]:
         """Query recent thermal observations filtered optionally by zone and event type."""
         return await asyncio.to_thread(self._list_observations_sync, zone_id, event_type, limit)
+
+    @staticmethod
+    def _row_to_advisor_report(row: tuple[Any, ...]) -> ThermalAdvisorReportRecord:
+        raw_extra = str(row[3]) if row[3] is not None else "{}"
+        try:
+            parsed = json.loads(raw_extra)
+            extra_attributes = dict(parsed) if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            extra_attributes = {}
+        return ThermalAdvisorReportRecord(
+            report_key=str(row[0]),
+            summary_state=str(row[1]),
+            report_markdown=str(row[2]),
+            extra_attributes=extra_attributes,
+            report_type=str(row[4]),
+            updated_at=str(row[5]),
+        )
+
+    def _save_advisor_report_sync(
+        self, record: ThermalAdvisorReportRecord
+    ) -> ThermalAdvisorReportRecord:
+        self._ensure_initialized_sync()
+        updated_at = record.updated_at or _utc_now_iso()
+        stored = record.model_copy(update={"updated_at": updated_at})
+        extra_json = json.dumps(stored.extra_attributes, ensure_ascii=False, sort_keys=True)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO thermal_advisor_reports (
+                    report_key, summary_state, report_markdown,
+                    extra_attributes_json, report_type, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(report_key) DO UPDATE SET
+                    summary_state = excluded.summary_state,
+                    report_markdown = excluded.report_markdown,
+                    extra_attributes_json = excluded.extra_attributes_json,
+                    report_type = excluded.report_type,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    stored.report_key,
+                    stored.summary_state,
+                    stored.report_markdown,
+                    extra_json,
+                    stored.report_type,
+                    stored.updated_at,
+                ),
+            )
+        return stored
+
+    async def save_advisor_report(
+        self, record: ThermalAdvisorReportRecord
+    ) -> ThermalAdvisorReportRecord:
+        """Atomically persist the latest thermal advisor report."""
+        async with self._write_lock:
+            return await asyncio.to_thread(self._save_advisor_report_sync, record)
+
+    def _get_advisor_report_sync(
+        self, report_key: str = "latest"
+    ) -> ThermalAdvisorReportRecord | None:
+        self._ensure_initialized_sync()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT report_key, summary_state, report_markdown,
+                       extra_attributes_json, report_type, updated_at
+                FROM thermal_advisor_reports
+                WHERE report_key = ?
+                """,
+                (report_key,),
+            ).fetchone()
+        return self._row_to_advisor_report(row) if row is not None else None
+
+    async def get_advisor_report(
+        self, report_key: str = "latest"
+    ) -> ThermalAdvisorReportRecord | None:
+        """Fetch the persisted thermal advisor report for ``report_key``, if present."""
+        return await asyncio.to_thread(self._get_advisor_report_sync, report_key)

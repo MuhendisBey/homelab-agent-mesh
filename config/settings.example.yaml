@@ -4,6 +4,8 @@
 # Zero personal infrastructure data is committed in this template.
 # ============================================================================
 
+timezone: "UTC"
+
 llm:
   model_id: "gemini-3.8-flash"
   embedding_model_id: "text-embedding-004"
@@ -127,6 +129,12 @@ memory:
         When host CPU load is high, non-critical batch/ML worker containers (such as photo
         machine-learning or transcoding jobs) may be temporarily paused using manage_container
         with action='pause', while protected network/DNS/orchestrator containers must never be touched.
+    - domain: "ha"
+      core: false
+      rule: >-
+        Motorized covers (cover.*) physically take 15-25s to open or close.
+        When assert_entity_state confirms a valid transitional state ('closing'/'opening'),
+        avoid repeating the same cover service call.
 
 sessions:
   max_sessions: 64
@@ -143,6 +151,13 @@ home_assistant:
   mutating_tools:
     - "call_ha_service"
     - "execute_sequential_loop"
+  domain_assert_policies:
+    cover:
+      timeout_sec: 15.0
+      poll_interval_ms: 1000
+      transitional_states:
+        closed: ["closing"]
+        open: ["opening"]
   entity_aliases:
     living_room_tv: "media_player.living_room_tv"
     main_thermostat: "climate.main_thermostat"
@@ -212,7 +227,7 @@ thermal:
   static_calibration_idle_minutes: 60
   dynamic_calibration_min_valve_pct: 50.0
   tick_interval_sec: 900
-  morning_briefing_time: "07:30"
+  daily_briefing_time: "20:00"
   night_window_start_hour: 0
   night_window_end_hour: 6
   anomaly_valve_open_pct: 80.0

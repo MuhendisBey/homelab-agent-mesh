@@ -1681,6 +1681,354 @@ async def test_turkish_morphology_edge_cases_and_domain_hints(
     assert res_supurge_short.top_entity_id == "vacuum.roborock"
 
 
+def test_logging_hygiene_secret_redaction_and_healthcheck_filter() -> None:
+    import io
+    import logging
+
+    from src.core.logging_utils import (
+        HealthCheckAccessFilter,
+        SecretRedactingFilter,
+        configure_logging,
+    )
+
+    secret_filter = SecretRedactingFilter()
+    health_filter = HealthCheckAccessFilter()
+
+    # 1. Direct message & %-formatted args redaction (including private path, bearer, query param)
+    rec_args = logging.LogRecord(
+        name="httpx2",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg='HTTP Request: POST %s "%s"',
+        args=("http://192.0.2.10:9584/private_TEST_SECRET_PATH_999", "HTTP/1.1 200 OK"),
+        exc_info=None,
+    )
+    assert secret_filter.filter(rec_args) is True
+    rendered = rec_args.getMessage()
+    assert "/private_***" in rendered
+    assert "TEST_SECRET_PATH_999" not in rendered
+
+    rec_bearer = logging.LogRecord(
+        name="src.test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="Authorization: Bearer TEST_BEARER_TOKEN_12345678?api_key=TEST_QUERY_KEY_999",
+        args=(),
+        exc_info=None,
+    )
+    assert secret_filter.filter(rec_bearer) is True
+    rendered_bearer = rec_bearer.getMessage()
+    assert "TEST_BEARER_TOKEN_12345678" not in rendered_bearer
+    assert "TEST_QUERY_KEY_999" not in rendered_bearer
+    assert "Bearer ***" in rendered_bearer
+    assert "api_key=***" in rendered_bearer
+
+    # 2. Healthcheck 200 OK suppressed, 500 error & voice 200 retained
+    rec_health_ok = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg='%s - "%s" %d',
+        args=("127.0.0.1:1234", "GET /api/v1/health HTTP/1.1", 200),
+        exc_info=None,
+    )
+    rec_health_err = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg='%s - "%s" %d',
+        args=("127.0.0.1:1234", "GET /api/v1/health HTTP/1.1", 500),
+        exc_info=None,
+    )
+    rec_voice_ok = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg='%s - "%s" %d',
+        args=("127.0.0.1:1234", "POST /api/v1/voice HTTP/1.1", 200),
+        exc_info=None,
+    )
+    assert health_filter.filter(rec_health_ok) is False
+    assert health_filter.filter(rec_health_err) is True
+    assert health_filter.filter(rec_voice_ok) is True
+
+    # 3. configure_logging sets HTTP client loggers to WARNING and avoids duplicate filters
+    tracked_names = ("httpx", "httpx2", "httpcore", "uvicorn", "uvicorn.error", "uvicorn.access")
+    root_logger = logging.getLogger()
+    saved_levels = {name: logging.getLogger(name).level for name in tracked_names}
+    saved_filters = {name: list(logging.getLogger(name).filters) for name in tracked_names}
+    saved_root_filters = list(root_logger.filters)
+    saved_handler_filters = [(h, list(h.filters)) for h in root_logger.handlers]
+
+    stream = io.StringIO()
+    temp_handler = logging.StreamHandler(stream)
+    root_logger.addHandler(temp_handler)
+    try:
+        configure_logging("INFO")
+        configure_logging("INFO")
+        for name in ("httpx", "httpx2", "httpcore"):
+            lgr = logging.getLogger(name)
+            assert lgr.level == logging.WARNING
+            assert sum(isinstance(f, SecretRedactingFilter) for f in lgr.filters) == 1
+        uv_access = logging.getLogger("uvicorn.access")
+        assert sum(isinstance(f, HealthCheckAccessFilter) for f in uv_access.filters) == 1
+
+        logging.getLogger("src.test_redaction").warning(
+            "Calling http://192.0.2.10:9584/private_SHOULD_REDACT_XYZ"
+        )
+        output = stream.getvalue()
+        assert "/private_***" in output
+        assert "SHOULD_REDACT_XYZ" not in output
+    finally:
+        root_logger.removeHandler(temp_handler)
+        root_logger.filters[:] = saved_root_filters
+        for handler, old_flts in saved_handler_filters:
+            handler.filters[:] = old_flts
+        for name in tracked_names:
+            lgr = logging.getLogger(name)
+            lgr.setLevel(saved_levels[name])
+            lgr.filters[:] = saved_filters[name]
+
+
+@pytest.mark.asyncio
+async def test_domain_assertion_policy_cover_transitional_states_and_voice_concurrency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.agents.supervisor import PendingApproval
+
+    cfg = _load_test_config(tmp_path, monkeypatch)
+
+    # 1. DomainAssertionPolicy for cover.*: transitional 'closing' satisfies expected_state='closed'
+    states_seq: list[EntityState] = [
+        EntityState(entity_id="cover.living_room_shade", state="open", attributes={"current_position": 100}),
+        EntityState(
+            entity_id="cover.living_room_shade", state="closing", attributes={"current_position": 85}
+        ),
+    ]
+    poll_calls = 0
+
+    class MockCoverAdapter(HomeAssistantWSAdapter):
+        async def get_state(self, entity_id: str) -> EntityState | None:
+            nonlocal poll_calls
+            if entity_id == "cover.living_room_shade":
+                idx = min(poll_calls, len(states_seq) - 1)
+                poll_calls += 1
+                return states_seq[idx]
+            return EntityState(entity_id=entity_id, state="open", attributes={"current_position": 100})
+
+    fast_policy_cfg = cfg.model_copy(
+        update={
+            "home_assistant": cfg.home_assistant.model_copy(
+                update={
+                    "domain_assert_policies": {
+                        "cover": cfg.home_assistant.domain_assert_policies["cover"].model_copy(
+                            update={"timeout_sec": 0.30, "poll_interval_ms": 60}
+                        )
+                    }
+                }
+            )
+        }
+    )
+    adapter = MockCoverAdapter(fast_policy_cfg)
+    ok_res = await adapter.assert_state("cover.living_room_shade", expected_state="closed")
+    assert isinstance(ok_res, StateAssertionSuccess)
+    assert ok_res.verified is True
+    assert ok_res.actual_state == "closing"
+    assert poll_calls == 2
+
+    # Transitional state MUST NOT bypass explicit expected_attributes assertions
+    attr_fail = await adapter.assert_state(
+        "cover.living_room_shade",
+        expected_state="closed",
+        timeout_sec=0.15,
+        poll_interval_ms=50,
+        expected_attributes={"current_position": 0},
+    )
+    assert isinstance(attr_fail, StateAssertionFailure)
+    assert attr_fail.verified is False
+    assert "current_position" in (attr_fail.reason or "")
+
+    # Non-transitional 'open' still fails when expecting 'closed' using policy timeout (~0.30s)
+    started = time.monotonic()
+    open_fail = await adapter.assert_state("cover.stays_open_shade", expected_state="closed")
+    elapsed = time.monotonic() - started
+    assert isinstance(open_fail, StateAssertionFailure)
+    assert open_fail.verified is False
+    assert elapsed < 1.5
+
+    # 2. Concurrent /api/v1/voice on busy session routes to overflow session instead of 409;
+    #    sessions awaiting HITL approval still return 409 Conflict.
+    store = ReflectionStore(
+        db_path=tmp_path / "voice_concurrency.db",
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        similarity_threshold=0.5,
+        local_fallback_dimensions=128,
+    )
+    resolver = EntityResolver(
+        config=cfg,
+        db_path=tmp_path / "voice_concurrency_er.db",
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        enable_ws_listener=False,
+    )
+    infra_toolkit = HomelabInfraToolkit(cfg)
+    ha_mock = MockCoverAdapter(cfg, entity_resolver=resolver)
+    announcer = Announcer(config=cfg, ha_adapter=ha_mock, entity_resolver=resolver)
+
+    models_seq: list[Model] = [
+        # Session 1 ('voice-busy')
+        ScriptedModel(["noop"]),
+        ScriptedModel(["noop"]),
+        DelayedScriptedModel(["İlk sesli komut tamamlandı."], delay_sec=0.55),
+        # Overflow session ('voice-busy__bg_...')
+        ScriptedModel(["noop"]),
+        ScriptedModel(["noop"]),
+        ScriptedModel(["İkinci sesli komut paralel tamamlandı."]),
+        # Session 3 ('voice-hitl')
+        ScriptedModel(["noop"]),
+        ScriptedModel(["noop"]),
+        ScriptedModel(["noop"]),
+    ]
+    factory = AgentFactory(
+        config=cfg,
+        memory_store=store,
+        ha_adapter=ha_mock,
+        infra_toolkit=infra_toolkit,
+        custom_model_factory=lambda _m, _t: models_seq.pop(0),
+        entity_resolver=resolver,
+    )
+    app = create_app(
+        config=cfg,
+        memory_store=store,
+        ha_adapter=ha_mock,
+        infra_toolkit=infra_toolkit,
+        factory=factory,
+        entity_resolver=resolver,
+        announcer=announcer,
+    )
+    with TestClient(app) as client:
+        r1 = client.post(
+            "/api/v1/voice",
+            json={
+                "text": "Uzun bir işlem başlat",
+                "session_id": "voice-busy",
+                "timeout_sec": 0.15,
+                "announce": False,
+            },
+        )
+        assert r1.status_code == 200
+        assert r1.json()["status"] == "accepted_background"
+
+        # Immediately send second voice command on the same session_id while lock is held
+        r2 = client.post(
+            "/api/v1/voice",
+            json={
+                "text": "Hızlı paralel soru",
+                "session_id": "voice-busy",
+                "announce": False,
+            },
+        )
+        assert r2.status_code == 200
+        b2 = r2.json()
+        assert b2["status"] == "completed"
+        assert b2["session_id"].startswith("voice-busy__bg_")
+        assert b2["speech"] == "İkinci sesli komut paralel tamamlandı."
+
+        # Pending HITL approval must still yield 409 Conflict
+        hitl_sess = app.state.runtime.get_or_create_session("voice-hitl")
+        now_utc = datetime.now(UTC)
+        hitl_sess.pending_approvals["app-hitl-1"] = PendingApproval(
+            approval_id="app-hitl-1",
+            session_id="voice-hitl",
+            interrupt_id="intr-1",
+            agent="InfraSubAgent",
+            tool="restart_container",
+            operation="restart_container",
+            args={"name": "media"},
+            reason="Approval required",
+            created_at=now_utc,
+            expires_at=now_utc + timedelta(minutes=5),
+        )
+        r_hitl = client.post(
+            "/api/v1/voice",
+            json={"text": "Yeni komut", "session_id": "voice-hitl", "announce": False},
+        )
+        assert r_hitl.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_entity_resolver_startup_dedup_and_adaptive_boot_debounce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import asynccontextmanager
+
+    cfg = _load_test_config(tmp_path, monkeypatch)
+    refresh_calls = 0
+
+    class CountingBackend:
+        @asynccontextmanager
+        async def ws_session(self) -> Any:
+            yield object()
+
+        async def send_ws_command(self, ws: Any, msg_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+            return {"id": msg_id, "type": "result", "success": True, "result": []}
+
+        async def get_all_states(self) -> list[dict[str, Any]]:
+            nonlocal refresh_calls
+            refresh_calls += 1
+            return []
+
+    resolver = EntityResolver(
+        config=cfg,
+        db_path=tmp_path / "adaptive_er.db",
+        ha_backend=CountingBackend(),
+        embedder=LocalHashedNgramEmbedder(dimensions=128),
+        reconcile_interval_sec=0.0,
+        enable_ws_listener=True,
+        normal_debounce_sec=0.12,
+        boot_debounce_sec=0.25,
+        ws_boot_settle_sec=0.40,
+    )
+
+    # 1. With enable_ws_listener=True, start() must not spawn a duplicate er_initial_sync task
+    await resolver.start()
+    try:
+        task_names = [t.get_name() for t in resolver._tasks]
+        assert "er_ws_listener" in task_names
+        assert "er_initial_sync" not in task_names
+    finally:
+        await resolver.stop()
+
+    # 2. Adaptive debounce delay calculation
+    resolver._ws_reconnect_settle_until = time.monotonic() + 5.0
+    assert resolver._effective_debounce_delay() == pytest.approx(0.25)
+    assert resolver._effective_debounce_delay(0.2) == pytest.approx(0.2)
+    resolver._ws_reconnect_settle_until = time.monotonic() - 1.0
+    assert resolver._effective_debounce_delay() == pytest.approx(0.12)
+
+    # 3. Rapid boot-storm registry events coalesce into a single debounced refresh
+    resolver._running = True
+    resolver._ws_reconnect_settle_until = time.monotonic() + 2.0
+    refresh_calls = 0
+    for idx in range(5):
+        await resolver.handle_registry_event(
+            "entity_registry_updated",
+            {"action": "update", "entity_id": f"sensor.boot_{idx}"},
+        )
+    await anyio.sleep(0.12)
+    assert refresh_calls == 0  # Still debouncing under boot_debounce_sec=0.25
+    await anyio.sleep(0.25)
+    assert refresh_calls == 1
+    await resolver.stop()
+
+
+
 
 
 

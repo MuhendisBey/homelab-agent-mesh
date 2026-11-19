@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -120,6 +121,34 @@ def _acquire_ready_session(
                 "message": f"Session '{session.session_id}' is already processing a request.",
             },
         )
+    return session
+
+
+def _acquire_voice_session(
+    runtime: SupervisorRuntime,
+    session_id: str | None,
+) -> SessionOrchestrator:
+    """Acquire a session for voice without blocking concurrent turns on background work."""
+    session: SessionOrchestrator = runtime.get_or_create_session(session_id)
+    session.prune_expired_approvals()
+    if session.pending_approvals:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": PendingInterventionError.code,
+                "message": "Session is paused awaiting human approval.",
+                "session_id": session.session_id,
+                "pending_approval_ids": list(session.pending_approvals.keys()),
+            },
+        )
+    if session.lock.locked():
+        overflow_id = f"{session.session_id}__bg_{uuid.uuid4().hex[:8]}"
+        logger.info(
+            "voice | session '%s' busy; routed concurrent voice turn to '%s'",
+            session.session_id,
+            overflow_id,
+        )
+        return runtime.get_or_create_session(overflow_id)
     return session
 
 
@@ -595,7 +624,6 @@ async def voice_command(
     its result asynchronously via `Announcer`.
     """
     started_at = time.monotonic()
-    session = _acquire_ready_session(runtime, body.session_id)
     prepared = await prepare_prompt_context(
         text=body.text,
         config=config,
@@ -604,6 +632,7 @@ async def voice_command(
         room=body.room,
         response_style="voice",
     )
+    session = _acquire_voice_session(runtime, body.session_id)
     cleaned_prompt = prepared.cleaned_prompt
     wake_detected = prepared.wake_word_detected
 
@@ -634,6 +663,13 @@ async def voice_command(
                 room=body.room,
                 speaker_entity=body.speaker_entity,
             )
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        logger.info(
+            "voice | session=%s status=%s elapsed_ms=%d timed_out=False",
+            session.session_id,
+            outcome.status,
+            elapsed_ms,
+        )
         return VoiceCommandResponse(
             status=outcome.status,
             speech=outcome.speech,
@@ -642,7 +678,7 @@ async def voice_command(
             wake_word_detected=wake_detected,
             session_id=session.session_id,
             timed_out=False,
-            elapsed_ms=int((time.monotonic() - started_at) * 1000),
+            elapsed_ms=elapsed_ms,
             verified_entities=outcome.verified_entities,
             scheduled_ids=outcome.scheduled_ids,
             pending_approvals=outcome.pending_approvals,
@@ -658,6 +694,12 @@ async def voice_command(
         )
     )
     _track_background_task(request, watcher_task)
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    logger.info(
+        "voice | session=%s status=accepted_background elapsed_ms=%d timed_out=True",
+        session.session_id,
+        elapsed_ms,
+    )
     return VoiceCommandResponse(
         status="accepted_background",
         speech=config.voice.deferred_ack_text,
@@ -666,7 +708,7 @@ async def voice_command(
         wake_word_detected=wake_detected,
         session_id=session.session_id,
         timed_out=True,
-        elapsed_ms=int((time.monotonic() - started_at) * 1000),
+        elapsed_ms=elapsed_ms,
     )
 
 

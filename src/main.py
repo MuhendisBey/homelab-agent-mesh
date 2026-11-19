@@ -28,6 +28,7 @@ from src.api.routes import router as api_router
 from src.core.announcer import Announcer
 from src.core.config import AppConfig, get_config
 from src.core.entity_resolver import EntityResolver
+from src.core.logging_utils import configure_logging
 from src.core.scheduler import ActionScheduler
 from src.memory.base import BaseMemoryStore
 from src.memory.reflection_store import ReflectionStore, build_embedder
@@ -36,13 +37,6 @@ from src.tools.infra_mcp_server import HomelabInfraToolkit
 from src.tools.thermal_tools import ThermalTwinService
 
 logger = logging.getLogger(__name__)
-
-
-def configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    )
 
 
 def create_app(

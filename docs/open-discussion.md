@@ -43,3 +43,46 @@ Sonuç olarak tek bir aç/kapat komutu **4–5 sıralı Gemini Flash çağrısı
 ### 1.4. Açık Sorular & Bağlantılı Notlar
 - Hızlı yol aktif edildiğinde çoklu niyet içeren karmaşık komutlar (örn. *"Mutfak ışığını aç ve 5 dakika sonra klimayı 22 dereceye ayarla"* veya *"Işığı aç ve Docker loglarına bak"*) yine mevcut `Supervisor -> SubAgent` delegasyon yoluna bırakılmalıdır.
 - İleri aşamada `docs/architecture_roadmap.md` v2.0 kapsamındaki tracing altyapısı eklendiğinde her LLM turu ve tool çağrısı span bazlı ölçülerek regresyon takibi yapılabilir.
+
+---
+
+## 2. CoALA `entity_memory` Belirsiz İfade & Kanonik ID Öğrenme Politikası (A3 — Tartışmaya Açık)
+
+- **Durum:** Açık (2026-11-19 Canlı Log ve `reflections.db` Denetimi)
+- **Hedef Bileşen:** [`entity_resolver.py`](../src/core/entity_resolver.py) (`register_pending_resolution` & Stage 0a)
+
+### 2.1. Problem Özeti
+Canlı veritabanı incelemesinde iki tür istenmeyen kayıt gözlemlendi:
+1. Oda belirtmeyen tek kelimelik belirsiz ifadeler (ör. `"güneşlik"`), farklı odalardaki birden fazla varlık için (`cover.study_shade`, `cover.kitchen_shade`, `cover.living_room_shade` benzeri çoklu adaylar) ayrı ayrı `entity_memory` tablosuna öğrenilmiştir. Gelecekte oda bağlamı olmadan aynı ifade söylendiğinde Stage 1 (`entity_memory_exact`) çakışan yüksek skorlu adaylar üretebilir.
+2. Zaten kanonik `entity_id` biçiminde gelen sorgular (`light.<room>_<device>`), Stage 0a'da `match_source="registry_grounding"` etiketiyle döndüğü için `static_alias` filtresini geçip gereksiz yere `entity_memory` satırı ve embedding çağrısı oluşturmaktadır.
+
+### 2.2. Tartışılacak Çözüm Noktaları
+- `register_pending_resolution()` içine `if result.ambiguous or not result.resolved: return` ve `match_source="canonical_id"` hariç tutma bekçileri eklenmesi;
+- Ancak kısa tek-kelimelik komutların (`room` bağlamı enjekte edilen sesli komutlar dahil) hangi koşullarda oda-bağımsız alias olarak öğrenilip hangilerinde engelleneceğinin kullanıcı deneyimiyle birlikte netleştirilmesi ve mevcut SQLite satırlarının kontrollü temizliği.
+
+---
+
+## 3. Konteyner RAM Bütçesi (`~180 MB` vs. `<80 MB` Hedef), `scipy`/`numpy` Bağımlılığı & `neonplan.json` Mount Noktası (A6 — Tartışmaya Açık)
+
+- **Durum:** Açık (2026-11-19 Canlı Konteyner Metrik Denetimi)
+- **Hedef Bileşenler:** [`thermal_engine.py`](../src/core/thermal_engine.py), [`pyproject.toml`](../pyproject.toml), [`docker-compose.yml`](../docker-compose.yml) (ve ops `compose.yaml`)
+
+### 3.1. Problem Özeti
+- Canlı konteynerde `VmRSS` yaklaşık **`180.6 MB`** (`VmPeak: ~818 MB`) ölçülmüştür (`AGENTS.md` hedefi `< 80 MB` / `< 128 MB`). `v2.0.0` ile eklenen `scipy` + `numpy`, yalnızca günde bir kez gece soğuma eğrisi ($T(t) = T_{\text{out}} + (T_0 - T_{\text{out}})e^{-k t}$) fit etmek için kullanılmakta, ancak kalıcı bellek tabanını ve Docker imaj boyutunu büyütmektedir.
+- Ayrıca dışarıdan `/app/data/neonplan.json:ro` bind-mount edilmesi, kalıcı `./data/` dizini içinde 0 byte'lık sahte bir mountpoint dosyası bırakmaktadır.
+
+### 3.2. Tartışılacak Çözüm Noktaları
+- Tek parametreli Newton soğuma fitini (`_fit_newton_cooling`) `scipy.optimize.curve_fit` yerine saf Python (`math.log` tabanlı lineer regresyon + 1B golden-section refinement) ile değiştirip `scipy`/`numpy` bağımlılıklarını kaldırma fizibilitesi (~60–80 MB RSS kazancı beklentisi);
+- `neonplan.json` varsayılan yolunu (`NEONPLAN_JSON_PATH`) `/app/config/neonplan.json` konumuna taşıyarak `./data/` hacmini salt veritabanı dosyalarına (`reflections.db*`) özgüleme.
+
+---
+
+## 4. Harici Donanım Telemetri Kesintilerinde Termal İkiz Sağlık İşaretlemesi
+
+- **Durum:** Açık (2026-11-19 HA `error_log` & `unavailable` Varlık Denetimi)
+- **Hedef Bileşenler:** [`thermal_engine.py`](../src/core/thermal_engine.py), [`ha_history_client.py`](../src/tools/ha_history_client.py)
+
+### 4.1. Gözlem & Öneri
+- Evdeki termostat/eTRV cihazlarından bazıları zaman zaman Home Assistant'ta `unavailable` durumuna düştüğünde (ör. vana pozisyonu veya aktüel sıcaklık sensörü okunamadığında), Termal İkiz varsayılan/eksik veriyle sessizce hesaplama yapmaya devam etmektedir.
+- İleri adımda `sensor.thermal_twin_<zone>_stats` özniteliklerine `sensor_health: "ok" | "degraded"` ve `unavailable_entities: [...]` eklenerek Lovelace panosu ve `ThermalSubAgent` tarafında veri kalitesi şeffaf biçimde gösterilebilir.
+

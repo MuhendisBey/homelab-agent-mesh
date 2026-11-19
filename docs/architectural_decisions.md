@@ -1,6 +1,6 @@
 # Mimari ve Tasarım Kararları Kayıt Defteri (ADR Kataloğu)
 
-*Proje: `homelab-agent-mesh` | Kapsam: `v1.0` – `v1.3.3` (+ P5 HA Assist Entegrasyonu)*
+*Proje: `homelab-agent-mesh` | Kapsam: `v1.0` – `v2.0.1` (+ P5 HA Assist Entegrasyonu)*
 
 Bu doküman; projede bugüne kadar alınan tüm temel mimari ve mühendislik kararlarını (**Architectural Decision Records — ADR**) **"Ne karar verdik? Neden verdik? Kısaca nasıl çalışıyor? Sonuçları ve ödünleşimleri neler?"** sorularını yanıtlayacak biçimde tek bir referans altında toplar.
 
@@ -25,6 +25,9 @@ Bu doküman; projede bugüne kadar alınan tüm temel mimari ve mühendislik kar
 | **ADR-10** | Hibrit Ses Geçidi (`8 sn` Senkron Bütçe) & Çok Kanallı `Announcer` | `asyncio.wait` + İptalsiz Arka Plan Devri + TTS + Push Bildirim Yedeği | [`routes.py`](../src/api/routes.py), [`announcer.py`](../src/core/announcer.py) |
 | **ADR-11** | Assist Boru Hattında STT/TTS İzolasyonu & İnce Adaptör | `custom_components/kezban` ayrı HA reposunda; STT/TTS tamamen generic | [`ha-integration.md`](ha-integration.md) |
 | **ADR-12** | Çift Repolu GitOps, 12-Factor Config & `SOPS + age` Gizlilik Hijyeni | Public kod (`homelab-agent-mesh`) vs Private ops (`homelab-ops`) + `.dockerignore` | [`config.py`](../src/core/config.py), [`deployment.md`](deployment.md) |
+| **ADR-13** | Gözlemlenebilirlik Hijyeni, Gizli URL Maskeleme & Healthcheck Filtresi | `SecretRedactingFilter` + `HealthCheckAccessFilter` + `httpx`/`httpx2` `WARNING` | [`logging_utils.py`](../src/core/logging_utils.py), [`main.py`](../src/main.py) |
+| **ADR-14** | Konfigürasyon Güdümlü `DomainAssertionPolicy` & Bloklamayan Ses Oturumu | Domain-bazlı ara durum doğrulama + meşgul ses oturumunda `__bg_<hex>` overflow | [`config.py`](../src/core/config.py), [`ha_ws_adapter.py`](../src/tools/ha_ws_adapter.py), [`routes.py`](../src/api/routes.py) |
+| **ADR-15** | IANA Zaman Dilimi İzolasyonu, Adaptif Boot Debounce & Rapor Kurtarma | `AppConfig.timezone` (`ZoneInfo`) + 60s boot debounce + `thermal_advisor_reports` | [`thermal_engine.py`](../src/core/thermal_engine.py), [`thermal_store.py`](../src/memory/thermal_store.py), [`thermal_tools.py`](../src/tools/thermal_tools.py), [`entity_resolver.py`](../src/core/entity_resolver.py) |
 
 ---
 
@@ -300,6 +303,71 @@ Kaynak kodu ve dağıtım/sırlar katmanı iki ayrı depoya bölündü: **public
 ### Sonuçları & Ödünleşimler
 - **Artıları:** Sıfır sır sızıntısı, tekrarlanabilir `linux/amd64` imajları, saniyeler içinde versiyon bazlı geri dönüş (`just rollback`).
 - **Eksileri:** Yayın sırasında çift dal (`main` + `mesh-release`) senkronizasyonuna dikkat edilmelidir (otomatik olmayan adımlarda `git add -A` asla kullanılmamalı, yalnızca izlenen dosyalar aşamalandırılmalıdır).
+
+---
+
+## ADR-13: Gözlemlenebilirlik Hijyeni, Gizli URL Maskeleme & Sağlık Kontrolü Filtrelemesi
+
+### Ne?
+Uygulama günlüğü yapılandırması tek sorumluluklu [`logging_utils.py`](../src/core/logging_utils.py) modülüne ayrıldı ve üçlü log hijyeni katmanı eklendi:
+1. `SecretRedactingFilter` (`/private_***`, `Bearer ***` ve gizli sorgu parametreleri için).
+2. `HealthCheckAccessFilter` (başarılı `200 OK` `/api/v1/health` erişim loglarını bastırma).
+3. `httpx`, `httpx2` ve `httpcore` istemci günlüklerinin `WARNING` seviyesine yükseltilmesi.
+
+### Neden?
+- Canlı konteyner denetiminde `httpx2` `INFO` kayıtlarının harici MCP gizli uç nokta yolunu (`/private_***`) açık metin olarak `stdout` loglarına yazdığı görüldü.
+- 30 saniyelik Docker healthcheck istekleri ile 15 dakikalık rutin `httpx` yoklamaları konteyner loglarının büyük bölümünü kaplayarak gerçek hata ve davranış analizini zorlaştırıyordu.
+
+### Kısaca Detay
+- [`configure_logging`](../src/core/logging_utils.py#L60-L88), root logger, root handler'lar, Uvicorn logger'ları (`uvicorn`, `uvicorn.error`, `uvicorn.access`) ve HTTP istemcilerine filtreleri idempotent olarak (`_attach_filter_once`) ekler.
+- `SecretRedactingFilter`, `record.getMessage()` çıktısını ve `exc_text` alanını maskeler; `HealthCheckAccessFilter` ise yalnızca `/api/v1/health` + ` 200` birleşimini süzer, `4xx`/`5xx` sağlık hatalarını görünür bırakır.
+
+### Sonuçları & Ödünleşimler
+- **Artıları:** Log sızıntısı riski ortadan kalkar, konteyner logları okunabilir hale gelir, tek bir `logging_utils` modülü üzerinden merkezi yönetim sağlanır (SRP).
+- **Eksileri:** İstek düzeyinde ham HTTP debug logu gerektiğinde geçici olarak `LOG_LEVEL=DEBUG` veya logger seviyesini değiştirme gerekir (ancak `SecretRedactingFilter` o durumda da aktif kalır).
+
+---
+
+## ADR-14: Konfigürasyon Güdümlü `DomainAssertionPolicy` & Bloklamayan Ses Oturumu
+
+### Ne?
+Fiziksel olarak yavaş hareket eden aktüatörler (`cover.*`) için sabit doğrulama penceresi yerine `settings.yaml` tabanlı **`DomainAssertionPolicy`** ([`config.py`](../src/core/config.py#L171-L176)) tanımlandı ve `/api/v1/voice` uç noktasında arka plan görevi kilidi varken gelen eşzamanlı sesli komutların `409 Conflict` ile reddedilmesi yerine izole taşma oturumuna (**overflow session**) yönlendirilmesi benimsendi.
+
+### Neden?
+- Motorlu güneşlik ve perdeler fiziksel olarak 15–25 saniyede kapanır. Varsayılan `6.0 sn` / `400 ms` `assert_state` döngüsü cihaz henüz `closing` durumundayken `StateAssertionFailure` üretiyor, LLM ise komutu başarısız sanıp gereksiz tekrarlar yaparak komutu `30–50 sn` uzatıyordu.
+- Bir sesli komut 8 sn bütçesini aşıp arka plana devredildiğinde `session.lock` tutulmaya devam ediyordu; aynı oturum kimliğiyle peş peşe gelen yeni sesli komutlar kullanıcıya soğuk `409 Conflict` hatası döndürüyordu.
+
+### Kısaca Detay
+- `home_assistant.domain_assert_policies` altında domain bazlı `timeout_sec`, `poll_interval_ms` ve `transitional_states` (ör. `cover` için `closed -> ["closing"]`, `open -> ["opening"]`) yapılandırılır.
+- [`HomeAssistantWSAdapter._matches`](../src/tools/ha_ws_adapter.py#L384-L420), ara durum eşleşmesini yalnızca devlet (state) düzeyinde kabul eder; açıkça `expected_attributes` (ör. `current_position=0`) istenmişse ara durum öznitelik doğrulamasını **asla baypas etmez** ve `StateAssertionSuccess.actual_state` donanımın gerçek durumunu (`"closing"`) dürüstçe raporlar.
+- [`_acquire_voice_session`](../src/api/routes.py#L123-L147): Oturumda bekleyen HITL onayı (`pending_approvals`) varsa güvenliği korumak adına `409 Conflict` vermeyi sürdürür; yalnızca `session.lock.locked()` durumunda yeni komutu `<session_id>__bg_<hex>` izole oturumuna yönlendirir.
+
+### Sonuçları & Ödünleşimler
+- **Artıları:** Yavaş cihazlarda sahte timeout/retry döngüsü ve gereksiz REST yoklaması biter; eşzamanlı sesli komutlar bloklanmaz; yeni aktüatör tipleri kod değiştirmeden YAML'dan eklenir (Open/Closed).
+- **Eksileri:** Taşma oturumu (`__bg_<hex>`), ana oturum meşgulken çalıştığı için ana oturumun o anki konuşma penceresinden bağımsızdır (oturum TTL/LRU ile otomatik temizlenir).
+
+---
+
+## ADR-15: IANA Zaman Dilimi İzolasyonu, Adaptif Boot Debounce & Restart-Dayanıklı Rapor Kurtarma
+
+### Ne?
+1. Konteyner OS saat diliminden bağımsız IANA zaman dilimi yönetimi (`AppConfig.timezone` + `ZoneInfo`), `daily_briefing_time` (`20:00`, `morning_briefing_time` geriye uyumlu) ve yerel saatte gece penceresi hesabı.
+2. `EntityResolver` açılışta çift senkronizasyonun kaldırılması ve HA yeniden başlatmalarındaki `registry_updated` fırtınası için 60 saniyelik adaptif `boot_debounce_sec=10.0` (404 self-healing `0.2s` korunarak).
+3. Termal danışman raporunun `thermal_advisor_reports` tablosunda kalıcı saklanması ve HA yeniden başlatması sonrası eksikse otomatik yeniden yayınlanması (`_republish_advisor_if_missing`).
+
+### Neden?
+- Konteyner UTC'de çalışırken `07:30` brifingi kışın `08:30`, yazın `09:30` yerel saatte tetikleniyordu ve gece soğuma penceresi UTC saatine kayıyordu.
+- HA restart olduğunda entegrasyonlar art arda yüklenirken `1.5s` debounce nedeniyle 35 saniyede 5–6 kez tam Grounding Index + SQLite snapshot yazımı tetikleniyordu.
+- HA yeniden başladığında yalnızca bellekte tutulan sanal `advisor_report` sensörü bir sonraki günlük brifinge kadar HA'dan kayboluyordu; ayrıca ajan konteyneri restart olduğunda aynı gün tekrar brifing tetiklenme riski vardı.
+
+### Kısaca Detay
+- [`ThermalPhysicsEngine`](../src/core/thermal_engine.py#L446-L457) ve [`ThermalTwinService._maybe_run_daily_briefing`](../src/tools/thermal_tools.py#L583-L601) zaman kontrollerini `config.tzinfo` (`ZoneInfo`) üzerinden yapar.
+- [`ThermalStore`](../src/memory/thermal_store.py#L361-L435) son raporu `thermal_advisor_reports` tablosuna yazar; `ThermalTwinService.initialize()` son günlük brifing tarihini geri yükler ve `run_live_tick(publish=True)` HA'da sensör eksik/bilinmeyen durumdaysa orijinal zaman damgasını koruyarak otomatik yeniden yayınlar.
+- [`EntityResolver`](../src/core/entity_resolver.py#L331-L445), `enable_ws_listener=True` iken gereksiz `er_initial_sync` görevini açmaz ve WS bağlandıktan sonraki `ws_boot_settle_sec` (60 sn) penceresinde olayları `boot_debounce_sec` (10 sn) altında birleştirir.
+
+### Sonuçları & Ödünleşimler
+- **Artıları:** Zaman dilimi kayması ve çift brifing sıfırlanır; HA restart sonrası hem danışman panosu hem varlık indeksi ekstra müdahale olmadan toparlanır.
+- **Eksileri:** HA açılışı sırasındaki yeni cihaz kayıtlarının Grounding Index'e yansıması ilk 60 sn içinde en fazla 10 sn gecikmeli (tek toplu senkronizasyonla) gerçekleşir.
 
 ---
 

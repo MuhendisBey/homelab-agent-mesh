@@ -1,5 +1,5 @@
 # Homelab & Smart Home Multi-Agent Mesh (AGENTS.md)
-*Sürüm: v2.0.0 | Son Güncelleme: 2026-11-16 (Spatial Thermal Digital Twin & Grey-Box RC Estimator — `ThermalSubAgent`)*
+*Sürüm: v2.0.1 | Son Güncelleme: 2026-11-19 (Production Log Audit Hardening: A1 Log Hygiene, A2 Cover Assertion Policy & Voice Concurrency, A4 Timezone/20:00 Briefing, A5 Adaptive Debounce & Advisor Report Recovery)*
 
 Bu doküman, projede yeni bir oturum (session) açıldığında sıfırdan başlamamak; mimariyi, tasarım kararlarını, dosya yapısını, güvenlik kurallarını ve anlık durumu eksiksiz hatırlamak için hazırlanmış operasyonel rehberdir.
 
@@ -157,6 +157,7 @@ homelab-agent-mesh/
     │   ├── exceptions.py            # Hiyerarşik domain hataları (CircuitOpen, GuardViolation)
     │   ├── guards.py                # Devre kesici (CircuitBreaker), HVAC ve Docker kalkanları
     │   ├── interfaces.py            # BaseStateVerifier ve EventEmitter protokolleri (DIP)
+    │   ├── logging_utils.py         # v2.0.1: Gizli URL/token maskeleme, healthcheck & HTTPX log hijyeni
     │   ├── neonplan_adapter.py      # v2.0: NeonPlan 3D JSON ayrıştırıcı & ZoneTopology grafiği
     │   ├── psychrometrics.py        # v2.0: Magnus-Tetens mutlak nem, çiğlenme noktası & entalpi
     │   ├── scheduler.py             # P2: SQLite + asyncio kalıcı ActionScheduler
@@ -185,18 +186,30 @@ homelab-agent-mesh/
 
 ---
 
-## 5. Projenin Güncel Durumu (2026-11-14 İtibarıyla)
+## 5. Projenin Güncel Durumu (2026-11-19 İtibarıyla)
 
 - [x] P1 (`EntityResolver` + Türkçe Kök Bulucu + CoALA `entity_memory`) ve P2 (`ActionScheduler`) modülleri yazıldı, Strands ajanlarına ve FastAPI uç noktalarına entegre edildi.
-- [x] `mypy --strict src tests` kontrolünden **28/28 dosya** 0 hata ile geçti; `ruff check` temiz.
-- [x] `pytest -v` ile hafıza, güvenlik kalkanları, bellek zehirlenmesi kalkanı, paralel telemetri, multi-interrupt, Türkçe varlık çözümleme (`EntityResolver`), zamanlayıcı (`ActionScheduler`), ses geçidi + HomePod `Announcer` ve Pre-Grounding + `GeminiEmbedder` LRU önbellek testleri doğrulandı (**10/10 passed**).
+- [x] `mypy --strict src tests` kontrolünden **39/39 dosya** 0 hata ile geçti; CI `ruff check` (`E,F,I,UP`) temiz; **28/28 pytest** geçiyor.
 - [x] Canlı Home Assistant (808 entity) üzerinde konteyner içi uçtan uca doğrulama tamamlandı:
   - `/api/v1/entities/resolve` ile `mutfak isigi` (`9.79 ms`, `entity_memory_exact`), `oturma odasi isik` (`16.72 ms`), `yatak odasindaki klimayi` (`15.09 ms`) sorguları harici embedding çağrısı olmadan tek hamlede çözümlendi.
   - `/api/v1/chat/stream` üzerinden `"Mutfaktaki isiklari ac, 15 saniye sonra geri kapat"` senaryosunda anında açma + `assert_entity_state` + CoALA `entity_memory` öğrenmesi + 15s sonra kalıcı zamanlayıcı ile kapatıp doğrulama (`status: "done"`, `verified: true`) uçtan uca teyit edildi.
 - [x] P3 GitOps kurulumu tamamlandı ve servis LXC 900 (`MuhendisBey/homelab-ops`, `SOPS + age + justfile`, Private GHCR `read:packages` PAT) üzerine taşındı.
 - [x] P4 (`v1.3.0`) & Hız Optimizasyonu (`v1.3.1`): `POST /api/v1/voice` (8 sn zaman aşımı bütçesi + arka plan devamlılığı), `POST /api/v1/voice/announce`, `Announcer` ve birleşik Pre-Grounding (`prepare_prompt_context`) + `GeminiEmbedder` LRU önbelleği canlıda doğrulandı (~14.8 sn -> ~2.6–4.0 sn).
-- [x] **v2.0.0 (Spatial Thermal Digital Twin & Grey-Box RC Estimator):** `NeonPlanAdapter` (Shoelace alan/hacim, duvar komşuluğu, `<0.5m` radyatör yakınlık sınıflandırması), `psychrometrics.py`, `ThermalPhysicsEngine` (eTRV radyasyon sapması füzyonu, gece soğuma $k_{\text{loss}}$ fit, havalandırma şoku/rebound & dirsek noktası, hidrolik denge ve parametrik simülasyon), `ThermalStore` (SQLite WAL), `HAHistoryClient`, `ThermalSubAgent` ve canlı Home Assistant `thermal-twin` Lovelace panosu doğrulandı (`22/22` pytest, `38/38` `mypy --strict`).
-- [ ] Sonraki aşama (P5): Özel Home Assistant `custom_components/kezban` conversation adaptörü + Google STT/TTS + Apple Watch Assist tetiklemesi (Mimari rehberi: 👉 **[docs/ha-integration.md](docs/ha-integration.md)**).
+- [x] **v2.0.0 (Spatial Thermal Digital Twin & Grey-Box RC Estimator):** `NeonPlanAdapter` (Shoelace alan/hacim, duvar komşuluğu, `<0.5m` radyatör yakınlık sınıflandırması), `psychrometrics.py`, `ThermalPhysicsEngine` (eTRV radyasyon sapması füzyonu, gece soğuma $k_{\text{loss}}$ fit, havalandırma şoku/rebound & dirsek noktası, hidrolik denge ve parametrik simülasyon), `ThermalStore` (SQLite WAL), `HAHistoryClient`, `ThermalSubAgent` ve canlı Home Assistant `thermal-twin` Lovelace panosu doğrulandı.
+- [x] **v2.0.1 (Canlı Log Denetimi İyileştirmeleri — A1, A2, A4, A5):**
+  - **A1:** `src/core/logging_utils.py` ile `/private_***` / `Bearer ***` / gizli query maskeleme, `200 OK` `/api/v1/health` filtresi ve `httpx`/`httpx2`/`httpcore` `WARNING` seviyesi.
+  - **A2:** `home_assistant.domain_assert_policies` (`cover.*` için `15s` timeout, `1000ms` poll, `closing`/`opening` ara durumları — `expected_attributes` kontrolünü baypas etmeden) ve `/api/v1/voice` meşgul oturumlarda `409` yerine `__bg_<hex>` overflow oturumu (HITL `pending_approvals` 409 koruması saklı).
+  - **A4:** `AppConfig.timezone` (`ZoneInfo` doğrulamalı, ops'ta `Europe/Amsterdam`) + `daily_briefing_time: "20:00"` (yerel saatte akşam 8; `morning_briefing_time` geriye uyumlu) + `_in_night_window` yerel saat hesabı.
+  - **A5:** `EntityResolver` açılışta çift senkronizasyon eliminasyonu + HA restart sonrası 60 sn adaptif `10s` boot debounce; `thermal_advisor_reports` SQLite tablosuyla restart-dayanıklı günlük brifing tarihi ve HA restart sonrası eksik danışman raporunun otomatik yeniden yayını.
+- [ ] Sonraki tartışma & geliştirme başlıkları: Ertelenen **A3** (`entity_memory` belirsiz ifade/kanonik ID öğrenme bekçisi) ve **A6** (saf Python RC soğuma fiti ile `<80 MB` RSS hedefi + `neonplan.json` mount yolu) kararları (`docs/open-discussion.md`); ayrıca P5 (`custom_components/kezban` + Apple Watch Assist: 👉 **[docs/ha-integration.md](docs/ha-integration.md)**).
+
+---
+
+### Operasyonel Dersler (Production Lessons Learned — 2026-11-19 Canlı Log Denetimi)
+1. **Log Hijyeni (`ADR-13`):** Harici HTTP/MCP istemci kütüphaneleri (`httpx`, `httpx2`, `httpcore`) `INFO` düzeyinde gizli path/token URL'lerini basabilir; root ve uvicorn logger/handler zincirinde merkezi `SecretRedactingFilter` zorunludur ve rutin `200 OK` healthcheck logları bastırılmalıdır.
+2. **Yavaş Aktüatörler & Ses Eşzamanlılığı (`ADR-14`):** Motorlu perde/güneşlik (`cover.*`) gibi 15–25 sn süren donanımlara sabit 6s/400ms doğrulama uygulamak sahte hata + LLM retry fırtınası yaratır ve sesli oturum kilidini uzatarak sonraki sesli komutları `409 Conflict`'e düşürür. Ara durumlar yalnızca config-driven `DomainAssertionPolicy` ile ve açık `expected_attributes` korunarak kabul edilmeli; meşgul ses oturumları HITL onayı beklemiyorsa izole overflow oturumuna yönlendirilmelidir.
+3. **Konteyner Saat Dilimi & Çift Taraflı Restart Dayanıklılığı (`ADR-15`):** Docker konteynerleri varsayılan `UTC` çalıştığından brifing ve gece soğuma pencereleri asla OS yerel saatine güvenmemeli, `AppConfig.timezone` (`ZoneInfo`) ile açıkça yönetilmelidir. Ayrıca HA restartı sanal sensörleri (`advisor_report`) siler ve boot registry fırtınası yaratırken, ajan konteyneri restartı günlük zamanlama durumunu sıfırlar — bu nedenle hem `EntityResolver` adaptif boot debounce uygulanmalı hem son danışman raporu SQLite'ta tutulup eksikse ilk `run_live_tick`'te geri basılmalıdır.
+4. **Açık/Ertelenen Konular:** `entity_memory` belirsiz tek kelime/kanonik ID kaydı (**A3**) ile `scipy`/`numpy` bellek ayak izi ve `neonplan.json` mount yolu (**A6**) ayrıntıları **[docs/open-discussion.md](docs/open-discussion.md)** içinde kayıtlıdır; onay olmadan değiştirilmemelidir.
 
 ---
 

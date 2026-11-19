@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -18,7 +18,7 @@ from src.core.entity_resolver import EntityResolver, RegistryEntityRecord
 from src.core.exceptions import HomeAssistantError
 from src.core.neonplan_adapter import BuildingTopology, NeonPlanAdapter
 from src.core.thermal_engine import ThermalPhysicsEngine, ThermalSnapshotSummary
-from src.memory.thermal_store import ThermalStore
+from src.memory.thermal_store import ThermalAdvisorReportRecord, ThermalStore
 from src.tools.ha_history_client import HAHistoryClient
 from src.tools.ha_ws_adapter import HomeAssistantWSAdapter
 
@@ -152,6 +152,8 @@ class ThermalTwinService:
         self._anomaly_cooldowns: dict[str, float] = {}
         self._last_briefing_date: date | None = None
         self._last_registry_marker: tuple[int, int, str | None] = (0, 0, None)
+        self._latest_advisor_report: ThermalAdvisorReportRecord | None = None
+        self._active_report_type: str = "manual"
 
     @property
     def topology(self) -> BuildingTopology:
@@ -228,7 +230,23 @@ class ThermalTwinService:
             topology=self._topology,
             store=self._store,
             settings=self._thermal_cfg,
+            tz=self._config.tzinfo,
         )
+        self._latest_advisor_report = await self._store.get_advisor_report("latest")
+        if (
+            self._latest_advisor_report is not None
+            and self._latest_advisor_report.report_type == "daily_briefing"
+        ):
+            raw_ts = self._latest_advisor_report.updated_at.strip()
+            if raw_ts.endswith("Z"):
+                raw_ts = f"{raw_ts[:-1]}+00:00"
+            try:
+                dt = datetime.fromisoformat(raw_ts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                self._last_briefing_date = dt.astimezone(self._config.tzinfo).date()
+            except ValueError:
+                pass
         self._initialized = True
         logger.info(
             "thermal | initialized with %d zone(s) (%d monitored)",
@@ -258,9 +276,10 @@ class ThermalTwinService:
         self._stop_event.clear()
         self._loop_task = asyncio.create_task(self._run_loop(), name="thermal_twin_loop")
         logger.info(
-            "thermal | background loop started (interval=%ds, briefing=%s)",
+            "thermal | background loop started (interval=%ds, briefing=%s (%s))",
             self._thermal_cfg.tick_interval_sec,
-            self._thermal_cfg.morning_briefing_time,
+            self._thermal_cfg.daily_briefing_time,
+            self._config.timezone,
         )
 
     async def stop(self) -> None:
@@ -317,10 +336,14 @@ class ThermalTwinService:
             "zone_details": anomaly_details,
         }
         if self._advisor_runner is not None:
+            prev_type = self._active_report_type
+            self._active_report_type = "anomaly"
             try:
                 await self._advisor_runner(json.dumps(payload, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("thermal | anomaly advisor runner failed: %s", exc)
+            finally:
+                self._active_report_type = prev_type
             return
 
         if self._thermal_cfg.publish_virtual_sensors and publish:
@@ -330,7 +353,11 @@ class ThermalTwinService:
             ]
             summary = f"Termal Uyarı: {', '.join(fresh_zones)}"
             md = f"## Termal İkiz Anomali Uyarısı ({snapshot.timestamp_utc})\n\n" + "\n".join(reasons)
-            await self.publish_advisor_report(summary_state=summary, report_markdown=md)
+            await self.publish_advisor_report(
+                summary_state=summary,
+                report_markdown=md,
+                report_type="anomaly",
+            )
 
     async def _maybe_refresh_topology(self) -> None:
         if self._entity_resolver is not None and self._config.neonplan_json_path.exists():
@@ -358,11 +385,47 @@ class ThermalTwinService:
 
         if self._thermal_cfg.publish_virtual_sensors and publish:
             await self._history_client.publish_snapshot_sensors(snapshot)
+            await self._republish_advisor_if_missing(raw_states)
 
         if trigger_advisor:
             await self._handle_anomalies(snapshot, publish=publish)
 
         return snapshot
+
+    async def _republish_advisor_if_missing(self, raw_states: Sequence[Mapping[str, Any]]) -> bool:
+        """Re-publish cached advisor report if HA restarted and cleared virtual entities."""
+        rec = self._latest_advisor_report
+        if rec is None:
+            rec = await self._store.get_advisor_report("latest")
+            self._latest_advisor_report = rec
+        if rec is None:
+            return False
+
+        target_eid = self._thermal_cfg.advisor_report_entity
+        existing_state: str | None = None
+        for item in raw_states:
+            if isinstance(item, Mapping) and str(item.get("entity_id", "")).strip() == target_eid:
+                raw_st = item.get("state")
+                existing_state = str(raw_st).strip() if raw_st is not None else ""
+                break
+
+        if existing_state is not None and existing_state.lower() not in {"", "unknown", "unavailable", "none"}:
+            return False
+
+        attrs = dict(rec.extra_attributes)
+        attrs["original_updated_at_utc"] = rec.updated_at
+        attrs["republished_after_ha_restart"] = True
+        await self._history_client.publish_advisor_report(
+            summary_state=rec.summary_state,
+            report_markdown=rec.report_markdown,
+            extra_attributes=attrs,
+        )
+        logger.info(
+            "thermal | republished missing '%s' to HA after restart (original_updated_at=%s)",
+            target_eid,
+            rec.updated_at,
+        )
+        return True
 
     def _gather_history_entity_ids(self, zone_id: str | None) -> tuple[list[str], str | None]:
         if zone_id is not None:
@@ -470,13 +533,26 @@ class ThermalTwinService:
         summary_state: str,
         report_markdown: str,
         extra_attributes: Mapping[str, Any] | None = None,
+        *,
+        report_type: str | None = None,
     ) -> dict[str, Any]:
-        """Publish the thermal advisor Markdown report to Home Assistant."""
-        return await self._history_client.publish_advisor_report(
+        """Publish the thermal advisor Markdown report to Home Assistant and persist it."""
+        result = await self._history_client.publish_advisor_report(
             summary_state=summary_state,
             report_markdown=report_markdown,
             extra_attributes=extra_attributes,
         )
+        eff_type = report_type or self._active_report_type
+        self._latest_advisor_report = await self._store.save_advisor_report(
+            ThermalAdvisorReportRecord(
+                report_key="latest",
+                summary_state=summary_state,
+                report_markdown=report_markdown,
+                extra_attributes=dict(extra_attributes or {}),
+                report_type=eff_type,
+            )
+        )
+        return result
 
     async def run_daily_briefing(self) -> str:
         """Run 24h calibration + live tick + 8h projection and publish advisor report."""
@@ -491,29 +567,44 @@ class ThermalTwinService:
             "history_analysis_24h": history_summary,
             "overnight_simulation_8h": simulation,
         }
-        if self._advisor_runner is not None:
-            try:
-                return await self._advisor_runner(json.dumps(payload, ensure_ascii=False))
-            except Exception as exc:
-                logger.warning(
-                    "thermal_service | advisor_runner failed, falling back to deterministic briefing: %s",
-                    exc,
-                )
+        prev_type = self._active_report_type
+        self._active_report_type = "daily_briefing"
+        try:
+            if self._advisor_runner is not None:
+                try:
+                    return await self._advisor_runner(json.dumps(payload, ensure_ascii=False))
+                except Exception as exc:
+                    logger.warning(
+                        "thermal_service | advisor_runner failed, falling back to deterministic briefing: %s",
+                        exc,
+                    )
 
-        summary_state, report_md = _format_deterministic_briefing(
-            snapshot=snapshot,
-            history_summary=history_summary,
-            simulation=simulation,
-        )
-        await self.publish_advisor_report(summary_state=summary_state, report_markdown=report_md)
-        return report_md
+            summary_state, report_md = _format_deterministic_briefing(
+                snapshot=snapshot,
+                history_summary=history_summary,
+                simulation=simulation,
+            )
+            await self.publish_advisor_report(
+                summary_state=summary_state,
+                report_markdown=report_md,
+                report_type="daily_briefing",
+            )
+            return report_md
+        finally:
+            self._active_report_type = prev_type
 
-    async def _maybe_run_morning_briefing(self, now_local: datetime | None = None) -> bool:
-        current = now_local or datetime.now().astimezone()
+    async def _maybe_run_daily_briefing(self, now_local: datetime | None = None) -> bool:
+        tz = self._config.tzinfo
+        if now_local is None:
+            current = datetime.now(tz)
+        elif now_local.tzinfo is None:
+            current = now_local.replace(tzinfo=tz)
+        else:
+            current = now_local.astimezone(tz)
         today = current.date()
         if self._last_briefing_date == today:
             return False
-        target_h, target_m = _parse_hhmm(self._thermal_cfg.morning_briefing_time)
+        target_h, target_m = _parse_hhmm(self._thermal_cfg.daily_briefing_time)
         if (current.hour, current.minute) < (target_h, target_m):
             return False
         self._last_briefing_date = today
@@ -545,11 +636,11 @@ class ThermalTwinService:
                 logger.warning("thermal | background live tick failed: %s", exc)
 
             try:
-                await self._maybe_run_morning_briefing()
+                await self._maybe_run_daily_briefing()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                logger.warning("thermal | scheduled morning briefing failed: %s", exc)
+                logger.warning("thermal | scheduled daily briefing failed: %s", exc)
 
 
 def build_thermal_tools(service: ThermalTwinService) -> list[AgentTool]:

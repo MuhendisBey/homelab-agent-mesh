@@ -8,6 +8,8 @@ services:
     user: "root"
     env_file:
       - .env
+    environment:
+      - TZ=${TZ:-UTC}
     ports:
       - "${APP_PORT:-8080}:${APP_PORT:-8080}"
     volumes:
